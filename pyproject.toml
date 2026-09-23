@@ -29,5 +29,11 @@ pdf-reader = [
 testpaths = ["tests"]
 addopts = "-ra"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
 [tool.ruff]
 line-length = 100
