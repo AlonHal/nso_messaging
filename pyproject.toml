@@ -9,6 +9,7 @@ description = "Take-home implementation of a simplified encrypted messaging prot
 requires-python = ">=3.11"
 dependencies = [
     "cryptography>=42,<47",
+    "PyNaCl>=1.5,<2",
 ]
 
 [project.optional-dependencies]
