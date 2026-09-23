@@ -27,3 +27,4 @@ Slice 3: CLI commands and explicit configuration defaults. Follow Red-Green-Refa
 
 - Cryptographic session setup and encrypted message exchange are not part of this foundation slice.
 - Durable server-side message history, phone-number verification, group messaging, media, and UI are out of scope for this slice.
+- Authentication, authorization, HMAC transport authentication, and encrypted message exchange are deferred to the protocol slice; this foundation is for local or trusted development only.

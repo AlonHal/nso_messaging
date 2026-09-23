@@ -32,6 +32,17 @@ def request_json(url, method="GET", payload=None):
         return response.status, json.load(response)
 
 
+def request_raw(url, body):
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        return response.status, json.load(response)
+
+
 def test_registration_persists_account_configuration(running_server):
     status, response = request_json(
         running_server.base_url + "/register",
@@ -64,3 +75,26 @@ def test_duplicate_registration_is_rejected(running_server):
         request_json(running_server.base_url + "/register", "POST", payload)
 
     assert error.value.code == 409
+
+
+@pytest.mark.parametrize("body", [b"null", b"[]", b'"text"', b"42"])
+def test_non_object_registration_body_is_rejected(running_server, body):
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request_raw(running_server.base_url + "/register", body)
+
+    assert error.value.code == 400
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"phone_number": "+15550005", "client_role": "companion"},
+        {"phone_number": "+15550006", "encryption_enabled": True},
+        {"phone_number": "+15550007", "encryption_enabled": "false"},
+    ],
+)
+def test_unsupported_registration_modes_are_rejected(running_server, payload):
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request_json(running_server.base_url + "/register", "POST", payload)
+
+    assert error.value.code == 400

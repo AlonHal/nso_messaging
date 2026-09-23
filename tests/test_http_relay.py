@@ -1,5 +1,6 @@
 import json
 import threading
+import urllib.error
 import urllib.request
 
 import pytest
@@ -71,3 +72,49 @@ def test_message_is_delivered_once_without_server_chat_history(running_server):
     _, empty = request_json(running_server.base_url + "/messages/+15550004")
     assert empty == []
     assert not (running_server.data_dir / "messages").exists()
+
+
+def test_incomplete_message_envelope_is_rejected(running_server):
+    register(running_server, "+15550008")
+    register(running_server, "+15550009")
+    request_json(
+        running_server.base_url + "/messages",
+        "POST",
+        {
+            "sender_id": "+15550008",
+            "recipient_id": "+15550009",
+            "content": "valid message",
+            "sent_at": "2026-09-23T12:00:00Z",
+        },
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request_json(
+            running_server.base_url + "/messages",
+            "POST",
+            {
+                "sender_id": "+15550008",
+                "recipient_id": "+15550009",
+                "content": "missing timestamp",
+            },
+        )
+
+    assert error.value.code == 400
+    _, delivered = request_json(running_server.base_url + "/messages/+15550009")
+    assert [message["content"] for message in delivered] == ["valid message"]
+
+
+def test_non_object_message_body_is_rejected(running_server):
+    register(running_server, "+15550012")
+    register(running_server, "+15550013")
+    request = urllib.request.Request(
+        running_server.base_url + "/messages",
+        data=b"null",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=2)
+
+    assert error.value.code == 400
