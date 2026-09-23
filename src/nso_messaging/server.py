@@ -99,10 +99,14 @@ class MessagingServer:
                 """Decode a request body without logging its potentially sensitive content."""
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
-                    return json.loads(self.rfile.read(length))
+                    payload = json.loads(self.rfile.read(length))
                 except (ValueError, json.JSONDecodeError):
                     self._send_error(400, "Request body must be valid JSON")
                     return None
+                if not isinstance(payload, dict):
+                    self._send_error(400, "Request body must be a JSON object")
+                    return None
+                return payload
 
             def _register(self):
                 """Validate and persist one account registration.
@@ -118,11 +122,26 @@ class MessagingServer:
                 if not isinstance(phone_number, str) or not phone_number.strip():
                     self._send_error(400, "phone_number is required")
                     return
+                client_role = payload.get("client_role", "primary")
+                if client_role != "primary":
+                    self._send_error(400, "only the primary client role is supported")
+                    return
+                encryption_enabled = payload.get("encryption_enabled", False)
+                if type(encryption_enabled) is not bool:
+                    self._send_error(400, "encryption_enabled must be a boolean")
+                    return
+                if encryption_enabled:
+                    self._send_error(400, "encrypted messaging is not implemented yet")
+                    return
+                name = payload.get("name")
+                if name is not None and not isinstance(name, str):
+                    self._send_error(400, "name must be a string or null")
+                    return
                 account = {
                     "phone_number": phone_number,
-                    "name": payload.get("name"),
-                    "client_role": payload.get("client_role", "primary"),
-                    "encryption_enabled": bool(payload.get("encryption_enabled", False)),
+                    "name": name,
+                    "client_role": client_role,
+                    "encryption_enabled": encryption_enabled,
                 }
                 with outer._lock:
                     if phone_number in outer._registrations:
@@ -148,6 +167,14 @@ class MessagingServer:
                 recipient_id = payload.get("recipient_id")
                 if not isinstance(sender_id, str) or not isinstance(recipient_id, str):
                     self._send_error(400, "sender_id and recipient_id are required")
+                    return
+                content = payload.get("content")
+                sent_at = payload.get("sent_at")
+                if not isinstance(content, str) or not content:
+                    self._send_error(400, "content is required and must be a non-empty string")
+                    return
+                if not isinstance(sent_at, str) or not sent_at:
+                    self._send_error(400, "sent_at is required and must be a non-empty string")
                     return
                 with outer._lock:
                     if sender_id not in outer._registrations:

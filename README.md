@@ -141,6 +141,7 @@ Run linting:
 
 - The server stores account configuration but does not persist chat history.
 - Message delivery uses a transient in-memory queue and polling.
+- The current HTTP relay has no authentication or authorization and is intended only for local or trusted development; authenticated HMAC/encrypted transport is a future protocol slice.
 - The current client role is `primary`.
 - Encryption is disabled and not implemented yet.
 - The `--client-role` and `--encryption-enabled` options reserve configuration space for future work, but unsupported values currently fail explicitly.
