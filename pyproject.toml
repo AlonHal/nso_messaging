@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nso-encrypted-messaging"
+version = "0.1.0"
+description = "Take-home implementation of a simplified encrypted messaging protocol"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=42,<47",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8,<9",
+    "pytest-cov>=5,<8",
+]
+dev = [
+    "ruff>=0.6,<1",
+]
+pdf-reader = [
+    "mcp>=1,<2",
+    "pypdf>=5,<7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
