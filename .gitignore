@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+tools/pdf-mcp/.venv/
+.env
+
+# Test/coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets / key material — never commit real keys
+*.key
+*.pem
+*.p12
+secrets/
+
+# Editor/OS
+.DS_Store
+
+# Reference material for this exercise (not project source)
+take-home-sep-9-2026.pdf
+WhatsApp-Encryption-Overview.pdf

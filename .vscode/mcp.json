@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"pdf-reader": {
+			"type": "stdio",
+			"command": "${workspaceFolder}/tools/pdf-mcp/.venv/bin/python",
+			"args": ["${workspaceFolder}/tools/pdf-mcp/server.py"]
+		}
+	}
+}
