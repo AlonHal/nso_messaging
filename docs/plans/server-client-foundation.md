@@ -1,4 +1,4 @@
-# Messaging App Development Plan
+# Server-Client Foundation Plan
 
 Scope: a CLI-driven primary client and local server foundation, with plaintext transport behind a configuration boundary. Encryption and companion-client support remain explicit future options.
 
@@ -26,4 +26,4 @@ Slice 3: CLI commands and explicit configuration defaults. Follow Red-Green-Refa
 ## Explicit Exclusions
 
 - Cryptographic session setup and encrypted message exchange are not part of this foundation slice.
-- Durable server-side message history, phone-number verification, group messaging, media, and UI are out of scope.
+- Durable server-side message history, phone-number verification, group messaging, media, and UI are out of scope for this slice.

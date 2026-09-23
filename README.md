@@ -146,4 +146,4 @@ Run linting:
 - The `--client-role` and `--encryption-enabled` options reserve configuration space for future work, but unsupported values currently fail explicitly.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.
 
-See [docs/development-plan.md](docs/development-plan.md) for the staged implementation plan.
+See [docs/plans/server-client-foundation.md](docs/plans/server-client-foundation.md) for the staged implementation plan for this feature.
