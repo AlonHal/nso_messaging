@@ -35,6 +35,7 @@ def test_load_config_uses_env_var_when_no_path_given(tmp_path, monkeypatch):
 
 def test_load_config_uses_default_filename_in_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("NSO_MESSAGING_CONFIG", raising=False)
     (tmp_path / "nso-messaging.config.json").write_text(json.dumps({"request_timeout": 99}))
 
     assert load_config() == {"request_timeout": 99}

@@ -162,7 +162,7 @@ Pausing at a breakpoint inside the server can take longer than a client's defaul
 }
 ```
 
-Point the CLI at it with `--config path/to/file.json`, or place it at `nso-messaging.config.json` in the current directory, or set `NSO_MESSAGING_CONFIG`. CLI flags always take precedence over the config file. The debug launch configs in `.vscode/launch.json` already pass generous timeouts so breakpoints don't trip client-side timeouts.
+Point the CLI at it with `--config path/to/file.json` (must be given *before* the subcommand, e.g. `nso-messaging --config file.json serve`), or place it at `nso-messaging.config.json` in the current directory, or set `NSO_MESSAGING_CONFIG`. CLI flags always take precedence over the config file. The debug launch configs in `.vscode/launch.json` already pass generous timeouts so breakpoints don't trip client-side timeouts.
 
 A `nso-messaging` console script is also installed into `.venv/bin` (via `[project.scripts]` in `pyproject.toml`), so commands can be run directly without `python -m`:
 

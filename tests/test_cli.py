@@ -41,7 +41,7 @@ def test_cli_register_send_receive_and_history(running_server, tmp_path, capsys)
     assert history[0]["direction"] == "received"
 
 
-def test_cli_config_option_accepted_before_and_after_subcommand(running_server, tmp_path, capsys):
+def test_cli_config_option_must_precede_subcommand(running_server, tmp_path, capsys):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"request_timeout": 30}))
     alice_dir = tmp_path / "alice"
@@ -53,17 +53,39 @@ def test_cli_config_option_accepted_before_and_after_subcommand(running_server, 
             "register", "--server", server, "--phone", "+15550022", "--state-dir", str(alice_dir),
         ]
     )
-    capsys.readouterr()
+    result = json.loads(capsys.readouterr().out)
+    assert result["phone_number"] == "+15550022"
+
+
+def test_cli_resolves_configured_timeout_and_explicit_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"request_timeout": 30}))
+    captured = []
+
+    class RecordingClient:
+        def __init__(self, *args, **kwargs):
+            captured.append(kwargs)
+
+        def register(self, name):
+            return {}
+
+    monkeypatch.setattr("nso_messaging.cli.MessagingClient", RecordingClient)
 
     main(
         [
-            "register",
-            "--server", server,
-            "--phone", "+15550023",
-            "--state-dir", str(tmp_path / "bob"),
             "--config", str(config_path),
+            "register", "--server", "http://x", "--phone", "+1", "--state-dir", str(tmp_path / "a"),
         ]
     )
-    result = json.loads(capsys.readouterr().out)
-    assert result["phone_number"] == "+15550023"
+    assert captured[-1]["request_timeout"] == 30
+
+    # an explicit --request-timeout still overrides the config file
+    main(
+        [
+            "--config", str(config_path),
+            "register", "--server", "http://x", "--phone", "+2", "--state-dir", str(tmp_path / "b"),
+            "--request-timeout", "5",
+        ]
+    )
+    assert captured[-1]["request_timeout"] == 5
 
