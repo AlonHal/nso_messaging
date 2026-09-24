@@ -91,7 +91,6 @@ def test_non_object_registration_body_is_rejected(running_server, body):
     "payload",
     [
         {"phone_number": "+15550005", "client_role": "companion"},
-        {"phone_number": "+15550006", "encryption_enabled": True},
         {"phone_number": "+15550007", "encryption_enabled": "false"},
     ],
 )

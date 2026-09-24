@@ -47,3 +47,28 @@ def test_client_publishes_and_fetches_public_pre_key_bundle(running_server, tmp_
     assert fetched.identity_x25519_public_key == private_bundle.identity.x25519_public_bytes
     assert len(fetched.one_time_pre_keys) == 0
     assert private_bundle.one_time_pre_keys
+
+
+def test_encrypted_clients_exchange_plaintext_only_in_local_history(running_server, tmp_path):
+    alice = MessagingClient(
+        running_server.base_url,
+        "+15550018",
+        tmp_path / "alice-encrypted",
+        encryption_enabled=True,
+    )
+    bob = MessagingClient(
+        running_server.base_url,
+        "+15550019",
+        tmp_path / "bob-encrypted",
+        encryption_enabled=True,
+    )
+    alice.register(name="Alice")
+    bob.register(name="Bob")
+
+    sent = alice.send("+15550019", "secret hello")
+    received = bob.receive()
+
+    assert sent["content"] == "secret hello"
+    assert received[0]["content"] == "secret hello"
+    assert alice.history()[0]["content"] == "secret hello"
+    assert bob.history()[0]["content"] == "secret hello"

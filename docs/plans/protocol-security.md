@@ -12,14 +12,14 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
   - Acceptance: public bundles are serialized safely; one-time pre-keys are removed when served; private key material never leaves the client.
 - [x] 4. Add HMAC authentication for client-server requests.
   - Acceptance: registration issues credentials; polling and sending require valid credentials; forged sender identities are rejected.
-- [ ] 5. Integrate encrypted message envelopes into client send/receive.
+- [x] 5. Integrate encrypted message envelopes into client send/receive.
   - Acceptance: clients establish sessions, encrypt/decrypt messages, advance chains once, and store plaintext only in local history.
 - [ ] 6. Add protocol integration and CLI tests.
   - Acceptance: two clients complete an encrypted round trip; tampered envelopes, invalid signatures, exhausted pre-keys, and unauthorized requests fail safely.
 
 ## Current Boundary
 
-The crypto, session, public pre-key transport, and HMAC request-authentication layers are usable in isolation. The HTTP relay still carries plaintext; it remains suitable only for local or trusted development until work item 5 is complete.
+The crypto, session, public pre-key transport, HMAC request-authentication, and encrypted client-envelope layers are integrated. The HTTP relay sees only opaque encrypted content for encrypted clients; work item 6 remains for broader protocol and CLI security coverage.
 
 ## Assignment Decisions
 

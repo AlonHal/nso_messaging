@@ -14,22 +14,50 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .config import DEFAULT_REQUEST_TIMEOUT
+from .crypto import decrypt_message, derive_message_key, encrypt_message
 from .session import (
+    IdentityKeyPair,
     PreKeyBundle,
     PublicPreKeyBundle,
+    SessionHeader,
+    SessionState,
     deserialize_public_bundle,
+    establish_initiator_session,
+    establish_responder_session,
     serialize_public_bundle,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def _b64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _unb64(encoded: str) -> bytes:
+    return base64.b64decode(encoded)
+
+
+def _serialize_session_header(header: SessionHeader) -> dict:
+    return {
+        "identity_public_key": _b64(header.identity_public_key),
+        "ephemeral_public_key": _b64(header.ephemeral_public_key),
+        "one_time_pre_key_id": header.one_time_pre_key_id,
+    }
+
+
+def _deserialize_session_header(data: dict) -> SessionHeader:
+    return SessionHeader(
+        identity_public_key=_unb64(data["identity_public_key"]),
+        ephemeral_public_key=_unb64(data["ephemeral_public_key"]),
+        one_time_pre_key_id=data.get("one_time_pre_key_id"),
+    )
+
+
 class MessagingClient:
     """Register, send, receive, and locally store plaintext messages.
 
-    The current client is intentionally primary-only and plaintext. The role and
-    encryption options remain explicit so future implementations can add them
-    without changing the local history interface.
+    The client supports primary-only plaintext or session-encrypted messaging.
     """
 
     def __init__(
@@ -50,8 +78,6 @@ class MessagingClient:
         """
         if client_role != "primary":
             raise NotImplementedError("Only the primary client role is currently supported")
-        if encryption_enabled:
-            raise NotImplementedError("Encrypted messaging is not implemented yet")
         self.server_url = server_url.rstrip("/")
         self.phone_number = phone_number
         self.client_role = client_role
@@ -62,6 +88,10 @@ class MessagingClient:
         self.database_path = self.state_dir / "messages.sqlite3"
         self.credentials_path = self.state_dir / "credentials.json"
         self.auth_key = self._load_auth_key()
+        self.identity = IdentityKeyPair.generate() if encryption_enabled else None
+        self.pre_key_bundle = PreKeyBundle.generate() if encryption_enabled else None
+        self._sessions: dict[str, SessionState] = {}
+        self._session_headers: dict[str, SessionHeader] = {}
         self._initialize_database()
         logger.info("client initialized for local account")
 
@@ -80,6 +110,8 @@ class MessagingClient:
         result = self._request("/register", "POST", payload)
         self.auth_key = result["auth_key"]
         self._save_auth_key()
+        if self.encryption_enabled:
+            self.publish_pre_key_bundle(self.pre_key_bundle)
         logger.info("client registration completed")
         return {key: value for key, value in result.items() if key != "auth_key"}
 
@@ -88,17 +120,20 @@ class MessagingClient:
         payload = serialize_public_bundle(bundle.public_bundle())
         return self._request(f"/bundles/{quote(self.phone_number, safe='')}", "POST", payload)
 
-    def fetch_pre_key_bundle(self) -> PublicPreKeyBundle:
+    def fetch_pre_key_bundle(self, recipient_id: str | None = None) -> PublicPreKeyBundle:
         """Fetch and deserialize one recipient's currently available public bundle."""
-        payload = self._request(f"/bundles/{quote(self.phone_number, safe='')}")
+        account_id = self.phone_number if recipient_id is None else recipient_id
+        payload = self._request(f"/bundles/{quote(account_id, safe='')}")
         return deserialize_public_bundle(payload)
 
     def send(self, recipient_id: str, content: str):
-        """Send one plaintext message and store the sent copy locally.
+        """Send one message and store the sent copy locally.
 
         The server assigns the authoritative message id. The client replaces
         its provisional id with that value before writing local history.
         """
+        if self.encryption_enabled:
+            return self._send_encrypted(recipient_id, content)
         message = {
             "message_id": str(uuid.uuid4()),
             "sender_id": self.phone_number,
@@ -119,10 +154,67 @@ class MessagingClient:
         harmless if a caller retries its history operation.
         """
         messages = self._request(f"/messages/{self.phone_number}")
-        for message in messages:
+        for index, message in enumerate(messages):
+            if self.encryption_enabled:
+                message = self._decrypt_envelope(message)
+                messages[index] = message
             self._store_message(message, "received")
         logger.info("messages received; count=%d", len(messages))
         return messages
+
+    def _send_encrypted(self, recipient_id: str, content: str):
+        """Encrypt a message using the recipient session's next send key."""
+        state = self._sessions.get(recipient_id)
+        if state is None:
+            recipient_bundle = self.fetch_pre_key_bundle(recipient_id)
+            state, header = establish_initiator_session(self.identity, recipient_bundle)
+            self._sessions[recipient_id] = state
+            self._session_headers[recipient_id] = header
+        message_key, next_chain_key = derive_message_key(state.send_chain_key)
+        ciphertext, mac = encrypt_message(message_key, content.encode())
+        state.send_chain_key = next_chain_key
+        envelope = {
+            "version": 1,
+            "header": _serialize_session_header(self._session_headers[recipient_id]),
+            "ciphertext": _b64(ciphertext),
+            "mac": _b64(mac),
+        }
+        message = {
+            "message_id": str(uuid.uuid4()),
+            "sender_id": self.phone_number,
+            "recipient_id": recipient_id,
+            "content": json.dumps(envelope, separators=(",", ":")),
+            "sent_at": datetime.now(UTC).isoformat(),
+        }
+        response = self._request("/messages", "POST", message)
+        message["message_id"] = response["message_id"]
+        message["content"] = content
+        self._store_message(message, "sent")
+        return message
+
+    def _decrypt_envelope(self, message):
+        """Decrypt one envelope and advance its receive chain after verification."""
+        envelope = json.loads(message["content"])
+        sender_id = message["sender_id"]
+        state = self._sessions.get(sender_id)
+        if state is None:
+            header = _deserialize_session_header(envelope["header"])
+            state = establish_responder_session(
+                self.pre_key_bundle,
+                header.identity_public_key,
+                header,
+            )
+            self._sessions[sender_id] = state
+        message_key, next_chain_key = derive_message_key(state.receive_chain_key)
+        plaintext = decrypt_message(
+            message_key,
+            _unb64(envelope["ciphertext"]),
+            _unb64(envelope["mac"]),
+        )
+        state.receive_chain_key = next_chain_key
+        decrypted = dict(message)
+        decrypted["content"] = plaintext.decode()
+        return decrypted
 
     def history(self):
         """Return locally stored messages in insertion order.

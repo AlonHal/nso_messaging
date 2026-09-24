@@ -194,9 +194,6 @@ class MessagingServer:
                 if type(encryption_enabled) is not bool:
                     self._send_error(400, "encryption_enabled must be a boolean")
                     return
-                if encryption_enabled:
-                    self._send_error(400, "encrypted messaging is not implemented yet")
-                    return
                 name = payload.get("name")
                 if name is not None and not isinstance(name, str):
                     self._send_error(400, "name must be a string or null")
