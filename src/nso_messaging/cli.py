@@ -17,15 +17,20 @@ def build_parser():
     Arguments are parsed here, while network and persistence behavior remains
     in the client and server classes for direct testing.
     """
-    parser = argparse.ArgumentParser(prog="nso-messaging")
-    parser.add_argument(
+    # A shared parent lets --config appear either before or after the
+    # subcommand (e.g. both `nso-messaging --config f.json serve` and
+    # `nso-messaging serve --config f.json` work).
+    config_parent = argparse.ArgumentParser(add_help=False)
+    config_parent.add_argument(
         "--config",
         help="Path to a JSON config file for request/socket timeouts "
         "(defaults to nso-messaging.config.json or NSO_MESSAGING_CONFIG)",
     )
+
+    parser = argparse.ArgumentParser(prog="nso-messaging", parents=[config_parent])
     commands = parser.add_subparsers(dest="command", required=True)
 
-    serve = commands.add_parser("serve")
+    serve = commands.add_parser("serve", parents=[config_parent])
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--data-dir", default="server-data")
@@ -36,19 +41,19 @@ def build_parser():
         help="Socket read timeout in seconds (default: no timeout)",
     )
 
-    register = commands.add_parser("register")
+    register = commands.add_parser("register", parents=[config_parent])
     _add_client_options(register)
     register.add_argument("--name")
 
-    send = commands.add_parser("send")
+    send = commands.add_parser("send", parents=[config_parent])
     _add_client_options(send)
     send.add_argument("--recipient", required=True)
     send.add_argument("--message", required=True)
 
-    receive = commands.add_parser("receive")
+    receive = commands.add_parser("receive", parents=[config_parent])
     _add_client_options(receive)
 
-    history = commands.add_parser("history")
+    history = commands.add_parser("history", parents=[config_parent])
     history.add_argument("--state-dir", required=True)
     return parser
 

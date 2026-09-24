@@ -14,7 +14,7 @@
             "justMyCode": true
         },
         {
-            "name": "Client: register",
+            "name": "Client: register (Alice)",
             "type": "debugpy",
             "request": "launch",
             "module": "nso_messaging",
@@ -24,6 +24,22 @@
                 "--phone", "+10000000000",
                 "--state-dir", "client-data/alice",
                 "--name", "Alice",
+                "--request-timeout", "600"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Client: register (Bob)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": [
+                "register",
+                "--server", "http://127.0.0.1:8000",
+                "--phone", "+10000000001",
+                "--state-dir", "client-data/bob",
+                "--name", "Bob",
                 "--request-timeout", "600"
             ],
             "console": "integratedTerminal",
