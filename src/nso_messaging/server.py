@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .config import DEFAULT_SOCKET_TIMEOUT
+from .session import deserialize_public_bundle, serialize_public_bundle, verify_signed_pre_key
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class MessagingServer:
         self._registrations_path = self.data_dir / "registrations.json"
         self._lock = threading.RLock()
         self._registrations = self._load_registrations()
+        self._bundles: dict[str, dict] = {}
         self._messages: dict[str, list[dict]] = {}
         self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
         self.http_server.messaging_server = self
@@ -88,6 +90,10 @@ class MessagingServer:
                 if parsed.path == "/health":
                     self._send_json(200, {"status": "ok"})
                     return
+                if parsed.path.startswith("/bundles/"):
+                    phone_number = unquote(parsed.path.removeprefix("/bundles/"))
+                    self._fetch_bundle(phone_number)
+                    return
                 if parsed.path.startswith("/messages/"):
                     recipient_id = unquote(parsed.path.removeprefix("/messages/"))
                     self._deliver_messages(recipient_id)
@@ -99,6 +105,10 @@ class MessagingServer:
                 parsed = urlparse(self.path)
                 if parsed.path == "/register":
                     self._register()
+                    return
+                if parsed.path.startswith("/bundles/"):
+                    phone_number = unquote(parsed.path.removeprefix("/bundles/"))
+                    self._publish_bundle(phone_number)
                     return
                 if parsed.path == "/messages":
                     self._queue_message()
@@ -165,6 +175,48 @@ class MessagingServer:
                     outer._save_registrations()
                 logger.info("account registered; total accounts=%d", len(outer._registrations))
                 self._send_json(201, account)
+
+            def _publish_bundle(self, phone_number):
+                """Store only a validated public pre-key bundle for an account."""
+                payload = self._read_json()
+                if payload is None:
+                    return
+                with outer._lock:
+                    if phone_number not in outer._registrations:
+                        self._send_error(404, "phone_number is not registered")
+                        return
+                try:
+                    bundle = deserialize_public_bundle(payload)
+                    verify_signed_pre_key(bundle)
+                    public_payload = serialize_public_bundle(bundle)
+                except (KeyError, TypeError, ValueError, IndexError):
+                    self._send_error(400, "public pre-key bundle is invalid")
+                    return
+                with outer._lock:
+                    outer._bundles[phone_number] = public_payload
+                logger.info("public pre-key bundle published")
+                self._send_json(201, {
+                    "phone_number": phone_number,
+                    "one_time_pre_key_count": len(public_payload["one_time_pre_keys"]),
+                })
+
+            def _fetch_bundle(self, phone_number):
+                """Return a bundle and consume at most one one-time pre-key."""
+                with outer._lock:
+                    if phone_number not in outer._registrations:
+                        self._send_error(404, "phone_number is not registered")
+                        return
+                    payload = outer._bundles.get(phone_number)
+                    if payload is None:
+                        self._send_error(404, "public pre-key bundle is not published")
+                        return
+                    payload = dict(payload)
+                    payload["one_time_pre_keys"] = list(payload["one_time_pre_keys"])
+                    if payload["one_time_pre_keys"]:
+                        payload["one_time_pre_keys"].pop(0)
+                        outer._bundles[phone_number]["one_time_pre_keys"].pop(0)
+                logger.info("public pre-key bundle fetched")
+                self._send_json(200, payload)
 
             def _queue_message(self):
                 """Queue an envelope for a registered recipient.

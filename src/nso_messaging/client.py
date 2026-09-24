@@ -8,8 +8,15 @@ import uuid
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from .config import DEFAULT_REQUEST_TIMEOUT
+from .session import (
+    PreKeyBundle,
+    PublicPreKeyBundle,
+    deserialize_public_bundle,
+    serialize_public_bundle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +75,16 @@ class MessagingClient:
         result = self._request("/register", "POST", payload)
         logger.info("client registration completed")
         return result
+
+    def publish_pre_key_bundle(self, bundle: PreKeyBundle):
+        """Publish this client's public pre-key material without private keys."""
+        payload = serialize_public_bundle(bundle.public_bundle())
+        return self._request(f"/bundles/{quote(self.phone_number, safe='')}", "POST", payload)
+
+    def fetch_pre_key_bundle(self) -> PublicPreKeyBundle:
+        """Fetch and deserialize one recipient's currently available public bundle."""
+        payload = self._request(f"/bundles/{quote(self.phone_number, safe='')}")
+        return deserialize_public_bundle(payload)
 
     def send(self, recipient_id: str, content: str):
         """Send one plaintext message and store the sent copy locally.

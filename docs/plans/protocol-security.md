@@ -8,7 +8,7 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
   - Acceptance: HKDF-SHA256 derives root and chain keys; HMAC chain advancement uses `0x01` and `0x02`; message material contains AES key, HMAC key, and derived IV; tampering fails before decryption.
 - [x] 2. Implement identity and initial session setup.
   - Acceptance: matched X25519/Ed25519 identity material, signed pre-key verification, one-time pre-key consumption, and matching initiator/responder directional chains.
-- [ ] 3. Publish and fetch public pre-key bundles through the server.
+- [x] 3. Publish and fetch public pre-key bundles through the server.
   - Acceptance: public bundles are serialized safely; one-time pre-keys are removed when served; private key material never leaves the client.
 - [ ] 4. Add HMAC authentication for client-server requests.
   - Acceptance: registration issues credentials; polling and sending require valid credentials; forged sender identities are rejected.
@@ -19,7 +19,7 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
 
 ## Current Boundary
 
-The crypto and session modules are usable in isolation. The existing HTTP relay still carries plaintext and does not authenticate callers; it remains suitable only for local or trusted development until work items 3-5 are complete.
+The crypto, session, and public pre-key transport layers are usable in isolation. The HTTP relay still carries plaintext and does not authenticate callers; it remains suitable only for local or trusted development until work items 4-5 are complete.
 
 ## Assignment Decisions
 

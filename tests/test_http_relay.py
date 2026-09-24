@@ -6,6 +6,7 @@ import urllib.request
 import pytest
 
 from nso_messaging.server import MessagingServer
+from nso_messaging.session import PreKeyBundle, serialize_public_bundle
 
 
 @pytest.fixture
@@ -118,3 +119,26 @@ def test_non_object_message_body_is_rejected(running_server):
         urllib.request.urlopen(request, timeout=2)
 
     assert error.value.code == 400
+
+
+def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(running_server):
+    register(running_server, "+15550014")
+    bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle())
+
+    status, response = request_json(
+        running_server.base_url + "/bundles/%2B15550014",
+        "POST",
+        bundle,
+    )
+
+    assert status == 201
+    assert response == {"phone_number": "+15550014", "one_time_pre_key_count": 2}
+
+    status, fetched = request_json(running_server.base_url + "/bundles/%2B15550014")
+    assert status == 200
+    assert fetched["identity_x25519_public_key"] == bundle["identity_x25519_public_key"]
+    assert len(fetched["one_time_pre_keys"]) == 1
+    assert "private_key" not in json.dumps(fetched)
+
+    _, fetched_again = request_json(running_server.base_url + "/bundles/%2B15550014")
+    assert fetched_again["one_time_pre_keys"] == []

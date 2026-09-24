@@ -1,10 +1,14 @@
+import json
+
 import pytest
 
 from nso_messaging.session import (
     IdentityKeyPair,
     PreKeyBundle,
+    deserialize_public_bundle,
     establish_initiator_session,
     establish_responder_session,
+    serialize_public_bundle,
     verify_signed_pre_key,
 )
 
@@ -39,3 +43,15 @@ def test_invalid_signed_pre_key_is_rejected():
 
     with pytest.raises(ValueError, match="signed pre-key signature"):
         verify_signed_pre_key(bundle)
+
+
+def test_public_bundle_round_trips_through_json_safe_serialization():
+    recipient = PreKeyBundle.generate(one_time_pre_key_count=2)
+    bundle = recipient.public_bundle()
+
+    wire_payload = json.loads(json.dumps(serialize_public_bundle(bundle)))
+    restored = deserialize_public_bundle(wire_payload)
+
+    assert restored == bundle
+    assert verify_signed_pre_key(restored)
+
