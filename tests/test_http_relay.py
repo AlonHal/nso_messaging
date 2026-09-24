@@ -260,3 +260,32 @@ def test_invalid_signed_bundle_is_rejected(running_server):
         )
 
     assert error.value.code == 400
+
+
+def test_public_bundles_survive_server_restart(running_server, tmp_path):
+    account = register(running_server, "+15550028")
+    bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle())
+    authenticated_request_json(
+        running_server.base_url + "/bundles/%2B15550028",
+        account["phone_number"],
+        account["auth_key"],
+        "POST",
+        bundle,
+    )
+
+    restarted_server = MessagingServer("127.0.0.1", 0, tmp_path)
+    thread = threading.Thread(target=restarted_server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, restored = authenticated_request_json(
+            restarted_server.base_url + "/bundles/%2B15550028",
+            account["phone_number"],
+            account["auth_key"],
+        )
+    finally:
+        restarted_server.shutdown()
+        thread.join(timeout=2)
+
+    assert status == 200
+    assert restored["identity_x25519_public_key"] == bundle["identity_x25519_public_key"]
+    assert len(restored["one_time_pre_keys"]) == 1

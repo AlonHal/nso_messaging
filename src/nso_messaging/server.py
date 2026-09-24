@@ -43,9 +43,10 @@ class MessagingServer:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._registrations_path = self.data_dir / "registrations.json"
+        self._bundles_path = self.data_dir / "pre_key_bundles.json"
         self._lock = threading.RLock()
         self._registrations = self._load_registrations()
-        self._bundles: dict[str, dict] = {}
+        self._bundles = self._load_bundles()
         self._messages: dict[str, list[dict]] = {}
         self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
         self.http_server.messaging_server = self
@@ -75,6 +76,18 @@ class MessagingServer:
         temporary_path = self._registrations_path.with_suffix(".tmp")
         temporary_path.write_text(json.dumps(self._registrations, indent=2, sort_keys=True))
         temporary_path.replace(self._registrations_path)
+
+    def _load_bundles(self) -> dict[str, dict]:
+        """Load persisted public pre-key bundles, or return an empty store."""
+        if not self._bundles_path.exists():
+            return {}
+        return json.loads(self._bundles_path.read_text())
+
+    def _save_bundles(self):
+        """Persist public bundles atomically so key consumption survives restart."""
+        temporary_path = self._bundles_path.with_suffix(".tmp")
+        temporary_path.write_text(json.dumps(self._bundles, indent=2, sort_keys=True))
+        temporary_path.replace(self._bundles_path)
 
     def _handler(self, socket_timeout: float | None = None):
         """Build a request handler bound to this server's state.
@@ -236,6 +249,7 @@ class MessagingServer:
                     return
                 with outer._lock:
                     outer._bundles[phone_number] = public_payload
+                    outer._save_bundles()
                 logger.info("public pre-key bundle published")
                 self._send_json(201, {
                     "phone_number": phone_number,
@@ -257,6 +271,7 @@ class MessagingServer:
                     if payload["one_time_pre_keys"]:
                         payload["one_time_pre_keys"].pop(0)
                         outer._bundles[phone_number]["one_time_pre_keys"].pop(0)
+                        outer._save_bundles()
                 logger.info("public pre-key bundle fetched")
                 self._send_json(200, payload)
 
