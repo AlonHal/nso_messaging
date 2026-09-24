@@ -14,12 +14,12 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
   - Acceptance: registration issues credentials; polling and sending require valid credentials; forged sender identities are rejected.
 - [x] 5. Integrate encrypted message envelopes into client send/receive.
   - Acceptance: clients establish sessions, encrypt/decrypt messages, advance chains once, and store plaintext only in local history.
-- [ ] 6. Add protocol integration and CLI tests.
+- [x] 6. Add protocol integration and CLI tests.
   - Acceptance: two clients complete an encrypted round trip; tampered envelopes, invalid signatures, exhausted pre-keys, and unauthorized requests fail safely.
 
 ## Current Boundary
 
-The crypto, session, public pre-key transport, HMAC request-authentication, and encrypted client-envelope layers are integrated. The HTTP relay sees only opaque encrypted content for encrypted clients; work item 6 remains for broader protocol and CLI security coverage.
+The crypto, session, public pre-key transport, HMAC request-authentication, encrypted client-envelope, and integration-test layers are complete. The HTTP relay sees only opaque encrypted content for encrypted clients; optional companion-device and DH-ratchet work remains outside this core scope.
 
 ## Assignment Decisions
 

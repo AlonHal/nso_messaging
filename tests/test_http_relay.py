@@ -243,3 +243,20 @@ def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(runnin
         account["auth_key"],
     )
     assert fetched_again["one_time_pre_keys"] == []
+
+
+def test_invalid_signed_bundle_is_rejected(running_server):
+    account = register(running_server, "+15550025")
+    bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=1).public_bundle())
+    bundle["signed_pre_key_signature"] = "AA=="
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        authenticated_request_json(
+            running_server.base_url + "/bundles/%2B15550025",
+            account["phone_number"],
+            account["auth_key"],
+            "POST",
+            bundle,
+        )
+
+    assert error.value.code == 400

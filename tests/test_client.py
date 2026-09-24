@@ -3,6 +3,7 @@ import threading
 import pytest
 
 from nso_messaging.client import MessagingClient
+from nso_messaging.crypto import AuthenticationError
 from nso_messaging.server import MessagingServer
 from nso_messaging.session import PreKeyBundle
 
@@ -72,3 +73,24 @@ def test_encrypted_clients_exchange_plaintext_only_in_local_history(running_serv
     assert received[0]["content"] == "secret hello"
     assert alice.history()[0]["content"] == "secret hello"
     assert bob.history()[0]["content"] == "secret hello"
+
+
+def test_tampered_encrypted_envelope_fails_before_history_write(running_server, tmp_path):
+    alice = MessagingClient(
+        running_server.base_url, "+15550023", tmp_path / "alice", encryption_enabled=True
+    )
+    bob = MessagingClient(
+        running_server.base_url, "+15550024", tmp_path / "bob", encryption_enabled=True
+    )
+    alice.register()
+    bob.register()
+    alice.send("+15550024", "tamper me")
+
+    envelope = running_server._messages["+15550024"][0]["content"]
+    tampered = envelope.replace("ciphertext", "ciphertext-tampered", 1)
+    running_server._messages["+15550024"][0]["content"] = tampered
+
+    with pytest.raises((AuthenticationError, KeyError)):
+        bob.receive()
+
+    assert bob.history() == []
