@@ -67,7 +67,11 @@ def main(argv=None):
     Operational logs go to stderr through the logging module, leaving stdout
     machine-readable for shell scripts and automated CLI tests.
     """
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(processName)s:%(threadName)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         server = MessagingServer(args.host, args.port, args.data_dir)
