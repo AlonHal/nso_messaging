@@ -1,5 +1,8 @@
 """Primary client with HTTP transport and local SQLite message history."""
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import sqlite3
@@ -57,6 +60,8 @@ class MessagingClient:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database_path = self.state_dir / "messages.sqlite3"
+        self.credentials_path = self.state_dir / "credentials.json"
+        self.auth_key = self._load_auth_key()
         self._initialize_database()
         logger.info("client initialized for local account")
 
@@ -73,8 +78,10 @@ class MessagingClient:
             "encryption_enabled": self.encryption_enabled,
         }
         result = self._request("/register", "POST", payload)
+        self.auth_key = result["auth_key"]
+        self._save_auth_key()
         logger.info("client registration completed")
-        return result
+        return {key: value for key, value in result.items() if key != "auth_key"}
 
     def publish_pre_key_bundle(self, bundle: PreKeyBundle):
         """Publish this client's public pre-key material without private keys."""
@@ -152,6 +159,18 @@ class MessagingClient:
                 """
             )
 
+    def _load_auth_key(self):
+        """Load the local transport credential, if this client was registered."""
+        if not self.credentials_path.exists():
+            return None
+        credentials = json.loads(self.credentials_path.read_text())
+        return credentials.get("auth_key")
+
+    def _save_auth_key(self):
+        """Persist the transport credential without including it in logs or history."""
+        self.credentials_path.write_text(json.dumps({"auth_key": self.auth_key}))
+        self.credentials_path.chmod(0o600)
+
     def _store_message(self, message, direction: str):
         """Persist one message and ignore duplicate deliveries by message id.
 
@@ -182,11 +201,20 @@ class MessagingClient:
         a single boundary without mixing it into history management.
         """
         data = None if payload is None else json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if self.auth_key is not None:
+            secret = base64.urlsafe_b64decode(self.auth_key.encode())
+            signed_data = method.encode() + b"\n" + path.encode() + b"\n" + (data or b"")
+            signature = hmac.new(secret, signed_data, hashlib.sha256).hexdigest()
+            headers.update({
+                "X-Auth-Account": self.phone_number,
+                "X-Auth-Signature": signature,
+            })
         request = urllib.request.Request(
             self.server_url + path,
             data=data,
             method=method,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(request, timeout=self.request_timeout) as response:
             return json.load(response)

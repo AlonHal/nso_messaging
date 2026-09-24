@@ -1,7 +1,11 @@
 """HTTP registration and message relay for the primary-client foundation."""
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
+import secrets
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -92,10 +96,14 @@ class MessagingServer:
                     return
                 if parsed.path.startswith("/bundles/"):
                     phone_number = unquote(parsed.path.removeprefix("/bundles/"))
+                    if not self._require_auth():
+                        return
                     self._fetch_bundle(phone_number)
                     return
                 if parsed.path.startswith("/messages/"):
                     recipient_id = unquote(parsed.path.removeprefix("/messages/"))
+                    if not self._require_auth():
+                        return
                     self._deliver_messages(recipient_id)
                     return
                 self._send_error(404, "Not found")
@@ -118,11 +126,15 @@ class MessagingServer:
             def log_message(self, format, *args):
                 logger.info("http request: " + format, *args)
 
-            def _read_json(self):
+            def _read_json(self, *, require_auth=False):
                 """Decode a request body without logging its potentially sensitive content."""
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
-                    payload = json.loads(self.rfile.read(length))
+                    raw_body = self.rfile.read(length)
+                    if require_auth and not self._is_authenticated(raw_body):
+                        self._send_error(401, "valid HMAC credentials are required")
+                        return None
+                    payload = json.loads(raw_body)
                 except (ValueError, json.JSONDecodeError):
                     self._send_error(400, "Request body must be valid JSON")
                     return None
@@ -130,6 +142,35 @@ class MessagingServer:
                     self._send_error(400, "Request body must be a JSON object")
                     return None
                 return payload
+
+            def _is_authenticated(self, body):
+                """Verify the request signature and return its authenticated account."""
+                account_id = self.headers.get("X-Auth-Account")
+                signature = self.headers.get("X-Auth-Signature")
+                if not account_id or not signature:
+                    return False
+                with outer._lock:
+                    account = outer._registrations.get(account_id)
+                if account is None or "auth_key" not in account:
+                    return False
+                try:
+                    secret = base64.urlsafe_b64decode(account["auth_key"].encode())
+                except (ValueError, TypeError):
+                    return False
+                signed_data = self.command.encode() + b"\n" + self.path.encode() + b"\n" + body
+                expected = hmac.new(secret, signed_data, hashlib.sha256).hexdigest()
+                return hmac.compare_digest(expected, signature)
+
+            def _require_auth(self):
+                """Verify an empty-body request and return whether it is authorized."""
+                if self._is_authenticated(b""):
+                    return True
+                self._send_error(401, "valid HMAC credentials are required")
+                return False
+
+            def _authenticated_account(self):
+                """Return the account named by the request's authentication header."""
+                return self.headers.get("X-Auth-Account")
 
             def _register(self):
                 """Validate and persist one account registration.
@@ -165,6 +206,7 @@ class MessagingServer:
                     "name": name,
                     "client_role": client_role,
                     "encryption_enabled": encryption_enabled,
+                    "auth_key": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"),
                 }
                 with outer._lock:
                     if phone_number in outer._registrations:
@@ -178,8 +220,11 @@ class MessagingServer:
 
             def _publish_bundle(self, phone_number):
                 """Store only a validated public pre-key bundle for an account."""
-                payload = self._read_json()
+                payload = self._read_json(require_auth=True)
                 if payload is None:
+                    return
+                if self._authenticated_account() != phone_number:
+                    self._send_error(403, "authenticated account does not match bundle owner")
                     return
                 with outer._lock:
                     if phone_number not in outer._registrations:
@@ -225,7 +270,7 @@ class MessagingServer:
                 fields as opaque. That keeps the current plaintext foundation
                 compatible with the future encrypted-envelope contract.
                 """
-                payload = self._read_json()
+                payload = self._read_json(require_auth=True)
                 if payload is None:
                     return
                 sender_id = payload.get("sender_id")
@@ -240,6 +285,9 @@ class MessagingServer:
                     return
                 if not isinstance(sent_at, str) or not sent_at:
                     self._send_error(400, "sent_at is required and must be a non-empty string")
+                    return
+                if self._authenticated_account() != sender_id:
+                    self._send_error(403, "authenticated account does not match sender_id")
                     return
                 with outer._lock:
                     if sender_id not in outer._registrations:

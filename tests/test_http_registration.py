@@ -56,12 +56,14 @@ def test_registration_persists_account_configuration(running_server):
     )
 
     assert status == 201
-    assert response == {
+    assert response | {"auth_key": None} == {
         "phone_number": "+15550001",
         "name": "Alice",
         "client_role": "primary",
         "encryption_enabled": False,
+        "auth_key": None,
     }
+    assert isinstance(response["auth_key"], str)
     assert json.loads((running_server.data_dir / "registrations.json").read_text()) == {
         "+15550001": response
     }

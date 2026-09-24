@@ -10,7 +10,7 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
   - Acceptance: matched X25519/Ed25519 identity material, signed pre-key verification, one-time pre-key consumption, and matching initiator/responder directional chains.
 - [x] 3. Publish and fetch public pre-key bundles through the server.
   - Acceptance: public bundles are serialized safely; one-time pre-keys are removed when served; private key material never leaves the client.
-- [ ] 4. Add HMAC authentication for client-server requests.
+- [x] 4. Add HMAC authentication for client-server requests.
   - Acceptance: registration issues credentials; polling and sending require valid credentials; forged sender identities are rejected.
 - [ ] 5. Integrate encrypted message envelopes into client send/receive.
   - Acceptance: clients establish sessions, encrypt/decrypt messages, advance chains once, and store plaintext only in local history.
@@ -19,7 +19,7 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
 
 ## Current Boundary
 
-The crypto, session, and public pre-key transport layers are usable in isolation. The HTTP relay still carries plaintext and does not authenticate callers; it remains suitable only for local or trusted development until work items 4-5 are complete.
+The crypto, session, public pre-key transport, and HMAC request-authentication layers are usable in isolation. The HTTP relay still carries plaintext; it remains suitable only for local or trusted development until work item 5 is complete.
 
 ## Assignment Decisions
 
