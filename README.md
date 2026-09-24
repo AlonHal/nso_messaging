@@ -202,7 +202,7 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 - The server stores account configuration but does not persist chat history.
 - Message delivery uses a transient in-memory queue and polling.
 - Registration issues per-account HMAC credentials; protected polling, bundle access, and message submission require signed requests.
-- Encrypted client identity and session state currently live in memory for the lifetime of a `MessagingClient`; restart-safe encrypted CLI sessions are not yet implemented.
+- Encrypted identity, pre-key, and session state are persisted below a SHA-256 phone-number fingerprint directory in the client's state directory.
 - The current client role is `primary`.
 - Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
 - The `--client-role` option is retained for configuration compatibility, but only `primary` is supported.

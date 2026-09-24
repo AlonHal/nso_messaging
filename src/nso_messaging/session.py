@@ -116,6 +116,42 @@ def deserialize_public_bundle(data: dict) -> PublicPreKeyBundle:
     )
 
 
+def serialize_private_bundle(bundle: PreKeyBundle) -> dict:
+    """Encode client-owned identity and pre-key material for local storage."""
+    return {
+        "identity_x25519_private_key": _b64(_raw_private_bytes(bundle.identity.x25519_private_key)),
+        "identity_ed25519_private_key": _b64(_raw_private_bytes(bundle.identity.ed25519_private_key)),
+        "signed_pre_key": _b64(_raw_private_bytes(bundle.signed_pre_key)),
+        "signed_pre_key_signature": _b64(bundle.signed_pre_key_signature),
+        "one_time_pre_keys": {
+            key_id: _b64(_raw_private_bytes(key))
+            for key_id, key in bundle.one_time_pre_keys.items()
+        },
+    }
+
+
+def deserialize_private_bundle(data: dict) -> PreKeyBundle:
+    """Restore client-owned identity and pre-key material from local storage."""
+    return PreKeyBundle(
+        identity=IdentityKeyPair(
+            x25519.X25519PrivateKey.from_private_bytes(
+                _unb64(data["identity_x25519_private_key"])
+            ),
+            ed25519.Ed25519PrivateKey.from_private_bytes(
+                _unb64(data["identity_ed25519_private_key"])
+            ),
+        ),
+        signed_pre_key=x25519.X25519PrivateKey.from_private_bytes(
+            _unb64(data["signed_pre_key"])
+        ),
+        signed_pre_key_signature=_unb64(data["signed_pre_key_signature"]),
+        one_time_pre_keys={
+            key_id: x25519.X25519PrivateKey.from_private_bytes(_unb64(encoded))
+            for key_id, encoded in data["one_time_pre_keys"].items()
+        },
+    )
+
+
 def _b64(raw: bytes) -> str:
     """Base64-encode raw key bytes for JSON transport."""
     return base64.b64encode(raw).decode("ascii")
@@ -253,4 +289,13 @@ def _raw_public_bytes(key) -> bytes:
     return key.public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
+    )
+
+
+def _raw_private_bytes(key) -> bytes:
+    """Serialize an X25519 or Ed25519 private key without encryption."""
+    return key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
     )

@@ -21,9 +21,11 @@ from .session import (
     PublicPreKeyBundle,
     SessionHeader,
     SessionState,
+    deserialize_private_bundle,
     deserialize_public_bundle,
     establish_initiator_session,
     establish_responder_session,
+    serialize_private_bundle,
     serialize_public_bundle,
 )
 
@@ -51,6 +53,24 @@ def _deserialize_session_header(data: dict) -> SessionHeader:
         identity_public_key=_unb64(data["identity_public_key"]),
         ephemeral_public_key=_unb64(data["ephemeral_public_key"]),
         one_time_pre_key_id=data.get("one_time_pre_key_id"),
+    )
+
+
+def _serialize_session_state(state: SessionState) -> dict:
+    return {
+        "root_key": _b64(state.root_key),
+        "send_chain_key": _b64(state.send_chain_key),
+        "receive_chain_key": _b64(state.receive_chain_key),
+        "identity_public_key": _b64(state.identity_public_key),
+    }
+
+
+def _deserialize_session_state(data: dict) -> SessionState:
+    return SessionState(
+        root_key=_unb64(data["root_key"]),
+        send_chain_key=_unb64(data["send_chain_key"]),
+        receive_chain_key=_unb64(data["receive_chain_key"]),
+        identity_public_key=_unb64(data["identity_public_key"]),
     )
 
 
@@ -87,11 +107,16 @@ class MessagingClient:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database_path = self.state_dir / "messages.sqlite3"
         self.credentials_path = self.state_dir / "credentials.json"
+        fingerprint = hashlib.sha256(phone_number.encode()).hexdigest()
+        self.crypto_state_dir = self.state_dir / "crypto" / fingerprint
+        self.crypto_state_path = self.crypto_state_dir / "state.json"
         self.auth_key = self._load_auth_key()
-        self.identity = IdentityKeyPair.generate() if encryption_enabled else None
-        self.pre_key_bundle = PreKeyBundle.generate() if encryption_enabled else None
+        self.identity = None
+        self.pre_key_bundle = None
         self._sessions: dict[str, SessionState] = {}
         self._session_headers: dict[str, SessionHeader] = {}
+        if encryption_enabled:
+            self._load_or_create_crypto_state()
         self._initialize_database()
         logger.info("client initialized for local account")
 
@@ -162,6 +187,41 @@ class MessagingClient:
         logger.info("messages received; count=%d", len(messages))
         return messages
 
+    def _load_or_create_crypto_state(self):
+        """Restore or initialize encrypted identity, pre-keys, and sessions."""
+        if self.crypto_state_path.exists():
+            state = json.loads(self.crypto_state_path.read_text())
+            self.pre_key_bundle = deserialize_private_bundle(state["pre_key_bundle"])
+            self.identity = self.pre_key_bundle.identity
+            for recipient_id, session in state.get("sessions", {}).items():
+                self._sessions[recipient_id] = _deserialize_session_state(session["state"])
+                self._session_headers[recipient_id] = _deserialize_session_header(
+                    session["header"]
+                )
+            return
+        self.identity = IdentityKeyPair.generate()
+        self.pre_key_bundle = PreKeyBundle.generate()
+        self._save_crypto_state()
+
+    def _save_crypto_state(self):
+        """Persist private encrypted state under the phone fingerprint directory."""
+        self.crypto_state_dir.mkdir(parents=True, exist_ok=True)
+        state = {
+            "version": 1,
+            "pre_key_bundle": serialize_private_bundle(self.pre_key_bundle),
+            "sessions": {
+                recipient_id: {
+                    "state": _serialize_session_state(session),
+                    "header": _serialize_session_header(self._session_headers[recipient_id]),
+                }
+                for recipient_id, session in self._sessions.items()
+            },
+        }
+        temporary_path = self.crypto_state_path.with_suffix(".tmp")
+        temporary_path.write_text(json.dumps(state, sort_keys=True))
+        temporary_path.replace(self.crypto_state_path)
+        self.crypto_state_path.chmod(0o600)
+
     def _send_encrypted(self, recipient_id: str, content: str):
         """Encrypt a message using the recipient session's next send key."""
         state = self._sessions.get(recipient_id)
@@ -190,6 +250,7 @@ class MessagingClient:
         message["message_id"] = response["message_id"]
         message["content"] = content
         self._store_message(message, "sent")
+        self._save_crypto_state()
         return message
 
     def _decrypt_envelope(self, message):
@@ -197,6 +258,7 @@ class MessagingClient:
         envelope = json.loads(message["content"])
         sender_id = message["sender_id"]
         state = self._sessions.get(sender_id)
+        new_session = False
         if state is None:
             header = _deserialize_session_header(envelope["header"])
             state = establish_responder_session(
@@ -204,7 +266,7 @@ class MessagingClient:
                 header.identity_public_key,
                 header,
             )
-            self._sessions[sender_id] = state
+            new_session = True
         message_key, next_chain_key = derive_message_key(state.receive_chain_key)
         plaintext = decrypt_message(
             message_key,
@@ -212,6 +274,10 @@ class MessagingClient:
             _unb64(envelope["mac"]),
         )
         state.receive_chain_key = next_chain_key
+        if new_session:
+            self._sessions[sender_id] = state
+            self._session_headers[sender_id] = header
+        self._save_crypto_state()
         decrypted = dict(message)
         decrypted["content"] = plaintext.decode()
         return decrypted

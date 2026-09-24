@@ -94,3 +94,26 @@ def test_tampered_encrypted_envelope_fails_before_history_write(running_server, 
         bob.receive()
 
     assert bob.history() == []
+
+
+def test_encrypted_state_survives_new_client_instances(running_server, tmp_path):
+    alice_dir = tmp_path / "alice-persistent"
+    bob_dir = tmp_path / "bob-persistent"
+    alice = MessagingClient(running_server.base_url, "+15550026", alice_dir, encryption_enabled=True)
+    bob = MessagingClient(running_server.base_url, "+15550027", bob_dir, encryption_enabled=True)
+    alice.register()
+    bob.register()
+    alice.send("+15550027", "before restart")
+    assert bob.receive()[0]["content"] == "before restart"
+
+    restarted_alice = MessagingClient(
+        running_server.base_url, "+15550026", alice_dir, encryption_enabled=True
+    )
+    restarted_bob = MessagingClient(
+        running_server.base_url, "+15550027", bob_dir, encryption_enabled=True
+    )
+
+    sent = restarted_alice.send("+15550027", "survives restart")
+    received = restarted_bob.receive()
+
+    assert received[0]["content"] == sent["content"] == "survives restart"
