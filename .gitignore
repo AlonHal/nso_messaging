@@ -11,6 +11,10 @@ tools/pdf-mcp/.venv/
 .coverage
 htmlcov/
 
+# Local runtime data from running the server/client manually
+server-data/
+client-data/
+
 # Secrets / key material — never commit real keys
 *.key
 *.pem
