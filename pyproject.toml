@@ -12,6 +12,9 @@ dependencies = [
     "PyNaCl>=1.5,<2",
 ]
 
+[project.scripts]
+nso-messaging = "nso_messaging.cli:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=8,<9",

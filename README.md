@@ -137,6 +137,27 @@ Run linting:
 .venv/bin/ruff check src tests
 ```
 
+## Debugging in VS Code
+
+`.vscode/launch.json` provides debug configurations for the server, each client command, and pytest:
+
+- `Serve: nso-messaging server`
+- `Client: register` / `send` / `receive` / `history`
+- `Pytest: Current File` / `Pytest: All tests`
+
+To debug the server, set a breakpoint inside `src/nso_messaging/server.py` (for example in `_register` for registration or `_queue_message` for sending), start `Serve: nso-messaging server` from the Run and Debug panel, then trigger the matching CLI command from a separate terminal or debug session. `ThreadingHTTPServer` handles each request on its own thread, but `debugpy` instruments every thread, so the breakpoint still stops execution.
+
+You can also run both a client and the server under the debugger at the same time: start two debug sessions (e.g. `Serve: nso-messaging server` and `Client: send`) to step through a request end-to-end.
+
+`.vscode/settings.json` points `python.defaultInterpreterPath` at `.venv/bin/python` and enables pytest discovery, so debug sessions and the Testing panel resolve against the project's virtual environment.
+
+A `nso-messaging` console script is also installed into `.venv/bin` (via `[project.scripts]` in `pyproject.toml`), so commands can be run directly without `python -m`:
+
+```bash
+.venv/bin/nso-messaging serve
+.venv/bin/nso-messaging register --server http://127.0.0.1:8000 --phone +15550001 --name Alice --state-dir client-data/alice
+```
+
 ## Current Scope and Limitations
 
 - The server stores account configuration but does not persist chat history.
