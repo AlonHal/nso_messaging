@@ -1,0 +1,94 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Serve: nso-messaging server",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": ["serve", "--host", "127.0.0.1", "--port", "8000", "--data-dir", "server-data"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Client: register",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": [
+                "register",
+                "--server", "http://127.0.0.1:8000",
+                "--phone", "+10000000000",
+                "--state-dir", "client-data/alice",
+                "--name", "Alice"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Client: send",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": [
+                "send",
+                "--server", "http://127.0.0.1:8000",
+                "--phone", "+10000000000",
+                "--state-dir", "client-data/alice",
+                "--recipient", "+10000000001",
+                "--message", "hello"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Client: receive",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": [
+                "receive",
+                "--server", "http://127.0.0.1:8000",
+                "--phone", "+10000000001",
+                "--state-dir", "client-data/bob"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Client: history",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": ["history", "--state-dir", "client-data/alice"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Pytest: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["-vv", "${file}"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Pytest: All tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["-vv"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
