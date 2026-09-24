@@ -6,7 +6,10 @@
             "type": "debugpy",
             "request": "launch",
             "module": "nso_messaging",
-            "args": ["serve", "--host", "127.0.0.1", "--port", "8000", "--data-dir", "server-data"],
+            "args": [
+                "serve", "--host", "127.0.0.1", "--port", "8000", "--data-dir", "server-data",
+                "--socket-timeout", "600"
+            ],
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -20,7 +23,8 @@
                 "--server", "http://127.0.0.1:8000",
                 "--phone", "+10000000000",
                 "--state-dir", "client-data/alice",
-                "--name", "Alice"
+                "--name", "Alice",
+                "--request-timeout", "600"
             ],
             "console": "integratedTerminal",
             "justMyCode": true
@@ -36,7 +40,8 @@
                 "--phone", "+10000000000",
                 "--state-dir", "client-data/alice",
                 "--recipient", "+10000000001",
-                "--message", "hello"
+                "--message", "hello",
+                "--request-timeout", "600"
             ],
             "console": "integratedTerminal",
             "justMyCode": true
@@ -50,7 +55,8 @@
                 "receive",
                 "--server", "http://127.0.0.1:8000",
                 "--phone", "+10000000001",
-                "--state-dir", "client-data/bob"
+                "--state-dir", "client-data/bob",
+                "--request-timeout", "600"
             ],
             "console": "integratedTerminal",
             "justMyCode": true

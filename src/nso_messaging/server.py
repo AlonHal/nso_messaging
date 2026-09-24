@@ -8,6 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from .config import DEFAULT_SOCKET_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,11 +20,20 @@ class MessagingServer:
     until the recipient polls, so this server does not become a chat-history store.
     """
 
-    def __init__(self, host: str, port: int, data_dir: str | Path):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        data_dir: str | Path,
+        *,
+        socket_timeout: float | None = DEFAULT_SOCKET_TIMEOUT,
+    ):
         """Create a server bound to ``host`` and ``port``.
 
         Passing port ``0`` asks the operating system to select a free port,
-        which is useful for tests and embedded usage.
+        which is useful for tests and embedded usage. ``socket_timeout`` bounds
+        how long a connection's socket waits for further request bytes; leave
+        it ``None`` (no timeout) when debugging a handler under a breakpoint.
         """
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -30,7 +41,7 @@ class MessagingServer:
         self._lock = threading.RLock()
         self._registrations = self._load_registrations()
         self._messages: dict[str, list[dict]] = {}
-        self.http_server = ThreadingHTTPServer((host, port), self._handler())
+        self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
         self.http_server.messaging_server = self
         bound_host, bound_port = self.http_server.server_address
         self.base_url = f"http://{bound_host}:{bound_port}"
@@ -59,7 +70,7 @@ class MessagingServer:
         temporary_path.write_text(json.dumps(self._registrations, indent=2, sort_keys=True))
         temporary_path.replace(self._registrations_path)
 
-    def _handler(self):
+    def _handler(self, socket_timeout: float | None = None):
         """Build a request handler bound to this server's state.
 
         ``BaseHTTPRequestHandler`` creates one handler instance per request, so
@@ -69,6 +80,8 @@ class MessagingServer:
         outer = self
 
         class RequestHandler(BaseHTTPRequestHandler):
+            timeout = socket_timeout
+
             def do_GET(self):
                 """Handle health checks and one-time recipient polling."""
                 parsed = urlparse(self.path)

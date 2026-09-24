@@ -151,6 +151,19 @@ You can also run both a client and the server under the debugger at the same tim
 
 `.vscode/settings.json` points `python.defaultInterpreterPath` at `.venv/bin/python` and enables pytest discovery, so debug sessions and the Testing panel resolve against the project's virtual environment.
 
+### Extending Timeouts While Debugging
+
+Pausing at a breakpoint inside the server can take longer than a client's default 5-second HTTP request timeout, causing the client to raise a timeout error before you finish stepping through code. Extend both sides with `--request-timeout` (client commands) and `--socket-timeout` (`serve`), or set them once in a JSON config file:
+
+```json
+{
+  "request_timeout": 600,
+  "socket_timeout": 600
+}
+```
+
+Point the CLI at it with `--config path/to/file.json`, or place it at `nso-messaging.config.json` in the current directory, or set `NSO_MESSAGING_CONFIG`. CLI flags always take precedence over the config file. The debug launch configs in `.vscode/launch.json` already pass generous timeouts so breakpoints don't trip client-side timeouts.
+
 A `nso-messaging` console script is also installed into `.venv/bin` (via `[project.scripts]` in `pyproject.toml`), so commands can be run directly without `python -m`:
 
 ```bash
