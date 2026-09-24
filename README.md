@@ -2,7 +2,7 @@
 
 A small Python server-client foundation for the take-home encrypted messaging assignment. The current implementation provides a primary client, an HTTP relay server, local client chat history, and a CLI.
 
-The current transport and message flow are plaintext. Cryptographic primitives and initial session setup now exist as isolated building blocks, but they are not wired into the HTTP client/server flow yet.
+The client supports authenticated HTTP requests and optional encrypted message envelopes. Companion clients and DH ratcheting are not implemented.
 
 ## Requirements
 
@@ -171,9 +171,9 @@ A `nso-messaging` console script is also installed into `.venv/bin` (via `[proje
 .venv/bin/nso-messaging register --server http://127.0.0.1:8000 --phone +15550001 --name Alice --state-dir client-data/alice
 ```
 
-## Cryptography and Session Primitives (Not Yet Wired Into the CLI)
+## Cryptography and Encrypted Messaging
 
-`src/nso_messaging/crypto.py` and `src/nso_messaging/session.py` implement the assignment's key derivation, session setup, and authenticated-message building blocks in isolation. They are exercised by `tests/test_crypto.py` and `tests/test_session.py`, but the HTTP client/server flow does not call them yet (see `docs/plans/protocol-security.md` for the remaining work items).
+`src/nso_messaging/crypto.py` and `src/nso_messaging/session.py` implement the assignment's key derivation, session setup, and authenticated-message building blocks. Encrypted `MessagingClient` instances publish public pre-key bundles, establish sessions on first send/receive, and keep decrypted plaintext only in local history.
 
 - `session.py`: `PreKeyBundle.generate()` creates a device's identity and pre-keys; `establish_initiator_session`/`establish_responder_session` perform an X3DH-style handshake and derive matching send/receive chain keys for both sides.
 - `crypto.py`: `derive_message_key` advances a chain key into fresh AES/HMAC/IV material, and `encrypt_message`/`decrypt_message` apply AES-256-CBC with an HMAC-SHA256 tag, rejecting tampered ciphertext or padding as `AuthenticationError`.
@@ -201,10 +201,11 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 
 - The server stores account configuration but does not persist chat history.
 - Message delivery uses a transient in-memory queue and polling.
-- The current HTTP relay has no authentication or authorization and is intended only for local or trusted development; authenticated HMAC/encrypted transport is a future protocol slice.
+- Registration issues per-account HMAC credentials; protected polling, bundle access, and message submission require signed requests.
+- Encrypted client identity and session state currently live in memory for the lifetime of a `MessagingClient`; restart-safe encrypted CLI sessions are not yet implemented.
 - The current client role is `primary`.
-- The live client/server flow is still plaintext; isolated crypto/session building blocks are covered by tests but not enabled yet.
-- The `--client-role` and `--encryption-enabled` options reserve configuration space for future work, but unsupported values currently fail explicitly.
+- Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
+- The `--client-role` option is retained for configuration compatibility, but only `primary` is supported.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.
 
 See [docs/plans/server-client-foundation.md](docs/plans/server-client-foundation.md) for the staged implementation plan for this feature.
