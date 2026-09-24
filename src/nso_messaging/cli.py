@@ -5,6 +5,7 @@ import json
 import logging
 
 from .client import MessagingClient
+from .config import load_config, resolve_request_timeout, resolve_socket_timeout
 from .server import MessagingServer
 
 logger = logging.getLogger(__name__)
@@ -17,12 +18,23 @@ def build_parser():
     in the client and server classes for direct testing.
     """
     parser = argparse.ArgumentParser(prog="nso-messaging")
+    parser.add_argument(
+        "--config",
+        help="Path to a JSON config file for request/socket timeouts "
+        "(defaults to nso-messaging.config.json or NSO_MESSAGING_CONFIG)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--data-dir", default="server-data")
+    serve.add_argument(
+        "--socket-timeout",
+        type=float,
+        default=None,
+        help="Socket read timeout in seconds (default: no timeout)",
+    )
 
     register = commands.add_parser("register")
     _add_client_options(register)
@@ -48,9 +60,15 @@ def _add_client_options(parser):
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--client-role", default="primary")
     parser.add_argument("--encryption-enabled", action="store_true")
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=None,
+        help="HTTP request timeout in seconds (default: 5, or from config)",
+    )
 
 
-def _client_from_args(args):
+def _client_from_args(args, config):
     """Construct a client from parsed command-line options."""
     return MessagingClient(
         args.server,
@@ -58,6 +76,7 @@ def _client_from_args(args):
         args.state_dir,
         client_role=args.client_role,
         encryption_enabled=args.encryption_enabled,
+        request_timeout=resolve_request_timeout(args.request_timeout, config),
     )
 
 
@@ -73,8 +92,14 @@ def main(argv=None):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     args = build_parser().parse_args(argv)
+    config = load_config(args.config)
     if args.command == "serve":
-        server = MessagingServer(args.host, args.port, args.data_dir)
+        server = MessagingServer(
+            args.host,
+            args.port,
+            args.data_dir,
+            socket_timeout=resolve_socket_timeout(args.socket_timeout, config),
+        )
         # Print the selected port before blocking so callers can discover it
         # when they request an ephemeral port for local development.
         print(json.dumps({"server_url": server.base_url}), flush=True)
@@ -86,11 +111,11 @@ def main(argv=None):
             server.shutdown()
         return
     if args.command == "register":
-        result = _client_from_args(args).register(args.name)
+        result = _client_from_args(args, config).register(args.name)
     elif args.command == "send":
-        result = _client_from_args(args).send(args.recipient, args.message)
+        result = _client_from_args(args, config).send(args.recipient, args.message)
     elif args.command == "receive":
-        result = _client_from_args(args).receive()
+        result = _client_from_args(args, config).receive()
     else:
         # History does not need a server connection, but it reuses the client's
         # query implementation so CLI and library results stay identical.

@@ -9,6 +9,8 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .config import DEFAULT_REQUEST_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,8 +30,14 @@ class MessagingClient:
         *,
         client_role: str = "primary",
         encryption_enabled: bool = False,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     ):
-        """Create a client and initialize its local SQLite history database."""
+        """Create a client and initialize its local SQLite history database.
+
+        ``request_timeout`` bounds how long ``urlopen`` waits for the server to
+        respond; raise it (or load a config file) when stepping through server
+        code under a debugger so requests don't time out mid-breakpoint.
+        """
         if client_role != "primary":
             raise NotImplementedError("Only the primary client role is currently supported")
         if encryption_enabled:
@@ -38,6 +46,7 @@ class MessagingClient:
         self.phone_number = phone_number
         self.client_role = client_role
         self.encryption_enabled = encryption_enabled
+        self.request_timeout = request_timeout
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database_path = self.state_dir / "messages.sqlite3"
@@ -162,5 +171,5 @@ class MessagingClient:
             method=method,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=self.request_timeout) as response:
             return json.load(response)
