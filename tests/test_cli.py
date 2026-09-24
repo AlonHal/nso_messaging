@@ -39,3 +39,31 @@ def test_cli_register_send_receive_and_history(running_server, tmp_path, capsys)
     main(["history", "--state-dir", str(bob_dir)])
     history = json.loads(capsys.readouterr().out)
     assert history[0]["direction"] == "received"
+
+
+def test_cli_config_option_accepted_before_and_after_subcommand(running_server, tmp_path, capsys):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"request_timeout": 30}))
+    alice_dir = tmp_path / "alice"
+    server = running_server.base_url
+
+    main(
+        [
+            "--config", str(config_path),
+            "register", "--server", server, "--phone", "+15550022", "--state-dir", str(alice_dir),
+        ]
+    )
+    capsys.readouterr()
+
+    main(
+        [
+            "register",
+            "--server", server,
+            "--phone", "+15550023",
+            "--state-dir", str(tmp_path / "bob"),
+            "--config", str(config_path),
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["phone_number"] == "+15550023"
+

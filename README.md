@@ -142,7 +142,7 @@ Run linting:
 `.vscode/launch.json` provides debug configurations for the server, each client command, and pytest:
 
 - `Serve: nso-messaging server`
-- `Client: register` / `send` / `receive` / `history`
+- `Client: register (Alice)` / `register (Bob)` / `send` / `receive` / `history`
 - `Pytest: Current File` / `Pytest: All tests`
 
 To debug the server, set a breakpoint inside `src/nso_messaging/server.py` (for example in `_register` for registration or `_queue_message` for sending), start `Serve: nso-messaging server` from the Run and Debug panel, then trigger the matching CLI command from a separate terminal or debug session. `ThreadingHTTPServer` handles each request on its own thread, but `debugpy` instruments every thread, so the breakpoint still stops execution.
