@@ -212,6 +212,38 @@ def test_message_requests_require_hmac_and_bind_sender_to_authenticated_account(
     assert forged_sender.value.code == 403
 
 
+def test_polling_requires_authenticated_recipient_and_preserves_queue(running_server):
+    sender = register(running_server, "+15550031")
+    recipient = register(running_server, "+15550032")
+    authenticated_request_json(
+        running_server.base_url + "/messages",
+        sender["phone_number"],
+        sender["auth_key"],
+        "POST",
+        {
+            "sender_id": sender["phone_number"],
+            "recipient_id": recipient["phone_number"],
+            "content": "private message",
+            "sent_at": "2026-09-25T12:00:00Z",
+        },
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as unauthorized_poll:
+        authenticated_request_json(
+            running_server.base_url + "/messages/%2B15550032",
+            sender["phone_number"],
+            sender["auth_key"],
+        )
+
+    assert unauthorized_poll.value.code == 403
+    _, delivered = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550032",
+        recipient["phone_number"],
+        recipient["auth_key"],
+    )
+    assert [message["content"] for message in delivered] == ["private message"]
+
+
 def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(running_server):
     account = register(running_server, "+15550014")
     bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle())

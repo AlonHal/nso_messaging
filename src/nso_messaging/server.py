@@ -327,6 +327,9 @@ class MessagingServer:
                 destructive and prevents two concurrent polls from receiving the
                 same envelope.
                 """
+                if self._authenticated_account() != recipient_id:
+                    self._send_error(403, "authenticated account does not match recipient")
+                    return
                 with outer._lock:
                     messages = outer._messages.pop(recipient_id, [])
                 logger.info("messages delivered; count=%d", len(messages))
