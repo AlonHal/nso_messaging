@@ -19,3 +19,4 @@ def test_encryption_flag_initializes_an_encrypted_client(tmp_path):
     assert client.encryption_enabled is True
     assert client.identity is not None
     assert client.pre_key_bundle is not None
+    assert client.identity is client.pre_key_bundle.identity

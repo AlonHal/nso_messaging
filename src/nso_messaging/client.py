@@ -16,7 +16,6 @@ from urllib.parse import quote
 from .config import DEFAULT_REQUEST_TIMEOUT
 from .crypto import decrypt_message, derive_message_key, encrypt_message
 from .session import (
-    IdentityKeyPair,
     PreKeyBundle,
     PublicPreKeyBundle,
     SessionHeader,
@@ -199,8 +198,8 @@ class MessagingClient:
                     session["header"]
                 )
             return
-        self.identity = IdentityKeyPair.generate()
         self.pre_key_bundle = PreKeyBundle.generate()
+        self.identity = self.pre_key_bundle.identity
         self._save_crypto_state()
 
     def _save_crypto_state(self):
