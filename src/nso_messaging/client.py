@@ -55,6 +55,11 @@ def _deserialize_session_header(data: dict) -> SessionHeader:
     )
 
 
+def _session_id(header: SessionHeader) -> str:
+    """Identify an initiated session by its unique ephemeral public key."""
+    return _b64(header.ephemeral_public_key)
+
+
 def _serialize_session_state(state: SessionState) -> dict:
     return {
         "root_key": _b64(state.root_key),
@@ -114,6 +119,8 @@ class MessagingClient:
         self.pre_key_bundle = None
         self._sessions: dict[str, SessionState] = {}
         self._session_headers: dict[str, SessionHeader] = {}
+        self._incoming_sessions: dict[tuple[str, str], SessionState] = {}
+        self._incoming_headers: dict[tuple[str, str], SessionHeader] = {}
         if encryption_enabled:
             self._load_or_create_crypto_state()
         self._initialize_database()
@@ -197,6 +204,10 @@ class MessagingClient:
                 self._session_headers[recipient_id] = _deserialize_session_header(
                     session["header"]
                 )
+            for session in state.get("incoming_sessions", []):
+                key = (session["peer_id"], session["session_id"])
+                self._incoming_sessions[key] = _deserialize_session_state(session["state"])
+                self._incoming_headers[key] = _deserialize_session_header(session["header"])
             return
         self.pre_key_bundle = PreKeyBundle.generate()
         self.identity = self.pre_key_bundle.identity
@@ -215,6 +226,15 @@ class MessagingClient:
                 }
                 for recipient_id, session in self._sessions.items()
             },
+            "incoming_sessions": [
+                {
+                    "peer_id": peer_id,
+                    "session_id": session_id,
+                    "state": _serialize_session_state(session),
+                    "header": _serialize_session_header(self._incoming_headers[(peer_id, session_id)]),
+                }
+                for (peer_id, session_id), session in self._incoming_sessions.items()
+            ],
         }
         temporary_path = self.crypto_state_path.with_suffix(".tmp")
         temporary_path.write_text(json.dumps(state, sort_keys=True))
@@ -256,10 +276,12 @@ class MessagingClient:
         """Decrypt one envelope and advance its receive chain after verification."""
         envelope = json.loads(message["content"])
         sender_id = message["sender_id"]
-        state = self._sessions.get(sender_id)
+        header = _deserialize_session_header(envelope["header"])
+        session_id = _session_id(header)
+        session_key = (sender_id, session_id)
+        state = self._incoming_sessions.get(session_key)
         new_session = False
         if state is None:
-            header = _deserialize_session_header(envelope["header"])
             state = establish_responder_session(
                 self.pre_key_bundle,
                 header.identity_public_key,
@@ -274,8 +296,8 @@ class MessagingClient:
         )
         state.receive_chain_key = next_chain_key
         if new_session:
-            self._sessions[sender_id] = state
-            self._session_headers[sender_id] = header
+            self._incoming_sessions[session_key] = state
+            self._incoming_headers[session_key] = header
         self._save_crypto_state()
         decrypted = dict(message)
         decrypted["content"] = plaintext.decode()

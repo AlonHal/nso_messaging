@@ -117,3 +117,20 @@ def test_encrypted_state_survives_new_client_instances(running_server, tmp_path)
     received = restarted_bob.receive()
 
     assert received[0]["content"] == sent["content"] == "survives restart"
+
+
+def test_encrypted_clients_can_cross_initiate_before_polling(running_server, tmp_path):
+    alice = MessagingClient(
+        running_server.base_url, "+15550029", tmp_path / "alice-crossed", encryption_enabled=True
+    )
+    bob = MessagingClient(
+        running_server.base_url, "+15550030", tmp_path / "bob-crossed", encryption_enabled=True
+    )
+    alice.register()
+    bob.register()
+
+    alice.send("+15550030", "hello from Alice")
+    bob.send("+15550029", "hello from Bob")
+
+    assert bob.receive()[0]["content"] == "hello from Alice"
+    assert alice.receive()[0]["content"] == "hello from Bob"
