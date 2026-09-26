@@ -169,13 +169,14 @@ class MessagingClient:
         if self.encryption_enabled:
             return self._send_encrypted(recipient_id, content)
         message = {
-            "message_id": str(uuid.uuid4()),
+            "client_message_id": str(uuid.uuid4()),
             "sender_id": self.phone_number,
             "recipient_id": recipient_id,
             "content": content,
             "sent_at": datetime.now(UTC).isoformat(),
         }
         response = self._request("/messages", "POST", message)
+        message.pop("client_message_id")
         message["message_id"] = response["message_id"]
         self._store_message(message, "sent")
         logger.info("message sent; local history updated")
@@ -193,6 +194,7 @@ class MessagingClient:
             if self.encryption_enabled:
                 message = self._decrypt_envelope(message)
                 messages[index] = message
+            message.pop("client_message_id", None)
             self._store_message(message, "received")
             acknowledged_ids.append(message["message_id"])
         if acknowledged_ids:
@@ -294,7 +296,7 @@ class MessagingClient:
             "mac": _b64(mac),
         }
         message = {
-            "message_id": str(uuid.uuid4()),
+            "client_message_id": str(uuid.uuid4()),
             "sender_id": self.phone_number,
             "recipient_id": recipient_id,
             "content": json.dumps(envelope, separators=(",", ":")),
@@ -302,6 +304,7 @@ class MessagingClient:
         }
         response = self._request("/messages", "POST", message, retries=1)
         state.send_chain_key = next_chain_key
+        message.pop("client_message_id")
         message["message_id"] = response["message_id"]
         message["content"] = content
         self._store_message(message, "sent")

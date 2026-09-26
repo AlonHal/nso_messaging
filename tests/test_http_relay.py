@@ -206,13 +206,56 @@ def test_repeated_message_id_is_idempotent(running_server):
 
     assert first_status == second_status == 202
     assert second_response == first_response
+    assert first_response["message_id"] != "client-message-1"
     _, delivered = authenticated_request_json(
         running_server.base_url + "/messages/%2B15550034",
         recipient["phone_number"],
         recipient["auth_key"],
     )
     assert len(delivered) == 1
-    assert delivered[0]["message_id"] == "client-message-1"
+    assert delivered[0]["message_id"] == first_response["message_id"]
+    assert delivered[0]["client_message_id"] == "client-message-1"
+
+
+def test_sender_scoped_client_ids_get_distinct_delivery_ids(running_server):
+    first_sender = register(running_server, "+15550043")
+    second_sender = register(running_server, "+15550044")
+    recipient = register(running_server, "+15550045")
+    shared_client_id = "sender-local-id"
+    responses = []
+
+    for sender, content in (
+        (first_sender, "from first sender"),
+        (second_sender, "from second sender"),
+    ):
+        _, response = authenticated_request_json(
+            running_server.base_url + "/messages",
+            sender["phone_number"],
+            sender["auth_key"],
+            "POST",
+            {
+                "client_message_id": shared_client_id,
+                "sender_id": sender["phone_number"],
+                "recipient_id": recipient["phone_number"],
+                "content": content,
+                "sent_at": "2026-09-25T12:00:00Z",
+            },
+        )
+        responses.append(response)
+
+    _, delivered = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550045",
+        recipient["phone_number"],
+        recipient["auth_key"],
+    )
+
+    assert responses[0]["message_id"] != responses[1]["message_id"]
+    assert len({message["message_id"] for message in delivered}) == 2
+    assert {message["client_message_id"] for message in delivered} == {shared_client_id}
+    assert {message["content"] for message in delivered} == {
+        "from first sender",
+        "from second sender",
+    }
 
 
 def test_incomplete_message_envelope_is_rejected(running_server):

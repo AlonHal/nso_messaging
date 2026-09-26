@@ -348,25 +348,30 @@ class MessagingServer:
                         logger.warning("message rejected: recipient is not registered")
                         self._send_error(404, "recipient is not registered")
                         return
-                    client_message_id = payload.get("message_id")
-                    receipt_key = (sender_id, client_message_id)
-                    if isinstance(client_message_id, str) and client_message_id:
+                    client_message_id = payload.get("client_message_id", payload.get("message_id"))
+                    if client_message_id is not None and (
+                        not isinstance(client_message_id, str) or not client_message_id
+                    ):
+                        self._send_error(400, "client_message_id must be a non-empty string")
+                        return
+                    if client_message_id is not None:
+                        receipt_key = (sender_id, client_message_id)
                         existing_receipt = outer._message_receipts.get(receipt_key)
                         if existing_receipt is not None:
                             self._send_json(202, existing_receipt)
                             return
                     message = dict(payload)
-                    message["message_id"] = (
-                        client_message_id if isinstance(client_message_id, str) and client_message_id
-                        else str(uuid.uuid4())
-                    )
+                    message.pop("message_id", None)
+                    if client_message_id is not None:
+                        message["client_message_id"] = client_message_id
+                    message["message_id"] = str(uuid.uuid4())
                     # The queue is deliberately transient; polling removes messages.
                     outer._messages.setdefault(recipient_id, []).append(message)
                     receipt = {
                         "message_id": message["message_id"],
                         "recipient_id": recipient_id,
                     }
-                    if isinstance(client_message_id, str) and client_message_id:
+                    if client_message_id is not None:
                         outer._message_receipts[receipt_key] = receipt
                 logger.info("message queued; pending recipient queues=%d", len(outer._messages))
                 self._send_json(202, receipt)
