@@ -46,7 +46,7 @@ class MessagingServer:
         self._bundles_path = self.data_dir / "pre_key_bundles.json"
         self._lock = threading.RLock()
         self._registrations = self._load_registrations()
-        self._bundles = self._load_bundles()
+        self._bundles, self._consumed_pre_key_ids = self._load_bundle_store()
         self._messages: dict[str, list[dict]] = {}
         self._message_receipts: dict[tuple[str, str], dict] = {}
         self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
@@ -78,16 +78,29 @@ class MessagingServer:
         temporary_path.write_text(json.dumps(self._registrations, indent=2, sort_keys=True))
         temporary_path.replace(self._registrations_path)
 
-    def _load_bundles(self) -> dict[str, dict]:
-        """Load persisted public pre-key bundles, or return an empty store."""
+    def _load_bundle_store(self) -> tuple[dict[str, dict], dict[str, set[str]]]:
+        """Load public bundles and their served-key ledger, accepting the legacy format."""
         if not self._bundles_path.exists():
-            return {}
-        return json.loads(self._bundles_path.read_text())
+            return {}, {}
+        stored_data = json.loads(self._bundles_path.read_text())
+        if stored_data.get("version") == 1 and "bundles" in stored_data:
+            bundles = stored_data["bundles"]
+            consumed_ids = stored_data.get("consumed_pre_key_ids", {})
+            return bundles, {account_id: set(key_ids) for account_id, key_ids in consumed_ids.items()}
+        return stored_data, {}
 
     def _save_bundles(self):
-        """Persist public bundles atomically so key consumption survives restart."""
+        """Persist bundles and served-key history together with atomic replacement."""
         temporary_path = self._bundles_path.with_suffix(".tmp")
-        temporary_path.write_text(json.dumps(self._bundles, indent=2, sort_keys=True))
+        stored_data = {
+            "version": 1,
+            "bundles": self._bundles,
+            "consumed_pre_key_ids": {
+                account_id: sorted(key_ids)
+                for account_id, key_ids in self._consumed_pre_key_ids.items()
+            },
+        }
+        temporary_path.write_text(json.dumps(stored_data, indent=2, sort_keys=True))
         temporary_path.replace(self._bundles_path)
 
     def _handler(self, socket_timeout: float | None = None):
@@ -252,7 +265,22 @@ class MessagingServer:
                 except (KeyError, TypeError, ValueError, IndexError):
                     self._send_error(400, "public pre-key bundle is invalid")
                     return
+                key_ids = [entry["key_id"] for entry in public_payload["one_time_pre_keys"]]
+                if any(not isinstance(key_id, str) or not key_id for key_id in key_ids):
+                    self._send_error(400, "one-time pre-key IDs must be non-empty strings")
+                    return
+                if len(key_ids) != len(set(key_ids)):
+                    self._send_error(400, "one-time pre-key IDs must be unique")
+                    return
                 with outer._lock:
+                    # This exercise has no bundle-rotation operation; immutability also protects legacy stores without served-key history.
+                    if phone_number in outer._bundles:
+                        self._send_error(409, "a pre-key bundle is already published for this account")
+                        return
+                    consumed_ids = outer._consumed_pre_key_ids.get(phone_number, set())
+                    if consumed_ids.intersection(key_ids):
+                        self._send_error(409, "bundle reintroduces a consumed one-time pre-key")
+                        return
                     outer._bundles[phone_number] = public_payload
                     outer._save_bundles()
                 logger.info("public pre-key bundle published")
@@ -276,6 +304,9 @@ class MessagingServer:
                     if available_pre_keys:
                         selected_pre_key = available_pre_keys.pop(0)
                         payload["one_time_pre_keys"] = [selected_pre_key]
+                        outer._consumed_pre_key_ids.setdefault(phone_number, set()).add(
+                            selected_pre_key["key_id"]
+                        )
                         outer._save_bundles()
                     else:
                         payload["one_time_pre_keys"] = []

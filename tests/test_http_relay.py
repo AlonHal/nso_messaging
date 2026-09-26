@@ -384,6 +384,76 @@ def test_invalid_signed_bundle_is_rejected(running_server):
     assert error.value.code == 400
 
 
+def test_republishing_a_consumed_one_time_pre_key_is_rejected(running_server):
+    account = register(running_server, "+15550041")
+    original_bundle = serialize_public_bundle(
+        PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle()
+    )
+    bundle_url = running_server.base_url + "/bundles/%2B15550041"
+    authenticated_request_json(
+        bundle_url,
+        account["phone_number"],
+        account["auth_key"],
+        "POST",
+        original_bundle,
+    )
+    _, first_fetched = authenticated_request_json(
+        bundle_url,
+        account["phone_number"],
+        account["auth_key"],
+    )
+
+    legacy_store = {account["phone_number"]: running_server._bundles[account["phone_number"]]}
+    (running_server.data_dir / "pre_key_bundles.json").write_text(
+        json.dumps(legacy_store)
+    )
+
+    restarted_server = MessagingServer("127.0.0.1", 0, running_server.data_dir)
+    thread = threading.Thread(target=restarted_server.serve_forever, daemon=True)
+    thread.start()
+    restarted_bundle_url = restarted_server.base_url + "/bundles/%2B15550041"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as replay:
+            authenticated_request_json(
+                restarted_bundle_url,
+                account["phone_number"],
+                account["auth_key"],
+                "POST",
+                original_bundle,
+            )
+        assert replay.value.code == 409
+        _, next_fetched = authenticated_request_json(
+            restarted_bundle_url,
+            account["phone_number"],
+            account["auth_key"],
+        )
+    finally:
+        restarted_server.shutdown()
+        thread.join(timeout=2)
+
+    assert first_fetched["one_time_pre_keys"] == [original_bundle["one_time_pre_keys"][0]]
+    assert next_fetched["one_time_pre_keys"] == [original_bundle["one_time_pre_keys"][1]]
+
+
+def test_duplicate_one_time_pre_key_ids_are_rejected(running_server):
+    account = register(running_server, "+15550042")
+    bundle = serialize_public_bundle(
+        PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle()
+    )
+    bundle["one_time_pre_keys"][1]["key_id"] = bundle["one_time_pre_keys"][0]["key_id"]
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        authenticated_request_json(
+            running_server.base_url + "/bundles/%2B15550042",
+            account["phone_number"],
+            account["auth_key"],
+            "POST",
+            bundle,
+        )
+
+    assert error.value.code == 400
+
+
 def test_public_bundles_survive_server_restart(running_server, tmp_path):
     account = register(running_server, "+15550028")
     bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle())
