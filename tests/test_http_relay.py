@@ -304,6 +304,7 @@ def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(runnin
     assert status == 200
     assert fetched["identity_x25519_public_key"] == bundle["identity_x25519_public_key"]
     assert len(fetched["one_time_pre_keys"]) == 1
+    assert fetched["one_time_pre_keys"][0] == bundle["one_time_pre_keys"][0]
     assert "private_key" not in json.dumps(fetched)
 
     _, fetched_again = authenticated_request_json(
@@ -311,7 +312,7 @@ def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(runnin
         account["phone_number"],
         account["auth_key"],
     )
-    assert fetched_again["one_time_pre_keys"] == []
+    assert fetched_again["one_time_pre_keys"] == [bundle["one_time_pre_keys"][1]]
 
 
 def test_invalid_signed_bundle_is_rejected(running_server):

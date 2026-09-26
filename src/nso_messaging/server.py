@@ -268,11 +268,13 @@ class MessagingServer:
                         self._send_error(404, "public pre-key bundle is not published")
                         return
                     payload = dict(payload)
-                    payload["one_time_pre_keys"] = list(payload["one_time_pre_keys"])
-                    if payload["one_time_pre_keys"]:
-                        payload["one_time_pre_keys"].pop(0)
-                        outer._bundles[phone_number]["one_time_pre_keys"].pop(0)
+                    available_pre_keys = outer._bundles[phone_number]["one_time_pre_keys"]
+                    if available_pre_keys:
+                        selected_pre_key = available_pre_keys.pop(0)
+                        payload["one_time_pre_keys"] = [selected_pre_key]
                         outer._save_bundles()
+                    else:
+                        payload["one_time_pre_keys"] = []
                 logger.info("public pre-key bundle fetched")
                 self._send_json(200, payload)
 

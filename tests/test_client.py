@@ -47,7 +47,7 @@ def test_client_publishes_and_fetches_public_pre_key_bundle(running_server, tmp_
 
     assert response["one_time_pre_key_count"] == 1
     assert fetched.identity_x25519_public_key == private_bundle.identity.x25519_public_bytes
-    assert len(fetched.one_time_pre_keys) == 0
+    assert len(fetched.one_time_pre_keys) == 1
     assert private_bundle.one_time_pre_keys
 
 
