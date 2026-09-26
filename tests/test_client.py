@@ -97,6 +97,74 @@ def test_tampered_encrypted_envelope_fails_before_history_write(running_server, 
     assert bob.history() == []
 
 
+def test_encrypted_receive_retries_ack_without_redecrypting(running_server, tmp_path, monkeypatch):
+    alice = MessagingClient(
+        running_server.base_url, "+15550046", tmp_path / "alice-ack-retry", encryption_enabled=True
+    )
+    bob_dir = tmp_path / "bob-ack-retry"
+    bob = MessagingClient(
+        running_server.base_url, "+15550047", bob_dir, encryption_enabled=True
+    )
+    alice.register()
+    bob.register()
+    alice.send("+15550047", "ack retry")
+
+    original_request = bob._request
+    failed_ack = False
+
+    def lose_ack_response(path, method="GET", payload=None, *, retries=0):
+        nonlocal failed_ack
+        if path.endswith("/ack") and not failed_ack:
+            failed_ack = True
+            original_request(path, method, payload, retries=retries)
+            raise urllib.error.URLError("temporary ACK failure")
+        return original_request(path, method, payload, retries=retries)
+
+    monkeypatch.setattr(bob, "_request", lose_ack_response)
+    with pytest.raises(urllib.error.URLError, match="temporary ACK failure"):
+        bob.receive()
+    assert running_server._messages.get("+15550047", []) == []
+
+    restarted_bob = MessagingClient(
+        running_server.base_url, "+15550047", bob_dir, encryption_enabled=True
+    )
+    retried = restarted_bob.receive()
+
+    assert failed_ack
+    assert retried == []
+    assert [message["content"] for message in restarted_bob.history()] == ["ack retry"]
+    assert restarted_bob.receive() == []
+
+
+def test_valid_message_before_malformed_batch_item_is_acknowledged(running_server, tmp_path):
+    alice = MessagingClient(
+        running_server.base_url, "+15550048", tmp_path / "alice-batch", encryption_enabled=True
+    )
+    bob = MessagingClient(
+        running_server.base_url, "+15550049", tmp_path / "bob-batch", encryption_enabled=True
+    )
+    alice.register()
+    bob.register()
+    alice.send("+15550049", "valid first")
+    alice.send("+15550049", "malformed second")
+
+    queued = running_server._messages["+15550049"]
+    malformed_id = queued[1]["message_id"]
+    queued[1]["content"] = queued[1]["content"].replace('"mac":"', '"mac":"AAAA', 1)
+
+    with pytest.raises((AuthenticationError, ValueError)):
+        bob.receive()
+    assert [message["content"] for message in bob.history()] == ["valid first"]
+
+    with pytest.raises((AuthenticationError, ValueError)):
+        bob.receive()
+
+    assert [message["message_id"] for message in running_server._messages["+15550049"]] == [
+        malformed_id
+    ]
+    assert [message["content"] for message in bob.history()] == ["valid first"]
+
+
 def test_encrypted_state_survives_new_client_instances(running_server, tmp_path):
     alice_dir = tmp_path / "alice-persistent"
     bob_dir = tmp_path / "bob-persistent"

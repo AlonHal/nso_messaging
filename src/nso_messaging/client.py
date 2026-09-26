@@ -124,6 +124,7 @@ class MessagingClient:
         self._session_headers: dict[str, SessionHeader] = {}
         self._incoming_sessions: dict[tuple[str, str], SessionState] = {}
         self._incoming_headers: dict[tuple[str, str], SessionHeader] = {}
+        self._processed_incoming: dict[str, dict] = {}
         if encryption_enabled:
             self._load_or_create_crypto_state()
         self._initialize_database()
@@ -185,14 +186,24 @@ class MessagingClient:
     def receive(self):
         """Poll the server, store delivered messages, and return them.
 
-        The local primary key makes repeated processing of the same envelope
-        harmless if a caller retries its history operation.
+        For encrypted messages, processing progress is persisted before ACK so
+        redelivery can retry acknowledgment without consuming another chain key.
         """
+        if self.encryption_enabled:
+            with self._crypto_state_lock():
+                self._restore_crypto_state()
+                return self._receive_locked()
+        return self._receive_locked()
+
+    def _receive_locked(self):
+        """Process queued messages while encrypted state is locked when enabled."""
+        if self.encryption_enabled:
+            self._flush_processed_incoming()
         messages = self._request(f"/messages/{self.phone_number}")
         acknowledged_ids = []
         for index, message in enumerate(messages):
             if self.encryption_enabled:
-                message = self._decrypt_envelope(message)
+                message = self._decrypt_envelope_locked(message)
                 messages[index] = message
             message.pop("client_message_id", None)
             self._store_message(message, "received")
@@ -203,8 +214,28 @@ class MessagingClient:
                 "POST",
                 {"message_ids": acknowledged_ids},
             )
+            if self.encryption_enabled:
+                for message_id in acknowledged_ids:
+                    self._processed_incoming.pop(message_id, None)
+                self._save_crypto_state()
         logger.info("messages received; count=%d", len(messages))
         return messages
+
+    def _flush_processed_incoming(self):
+        """Persist cached plaintext and retry ACKs before polling for more data."""
+        if not self._processed_incoming:
+            return
+        message_ids = list(self._processed_incoming)
+        for message in self._processed_incoming.values():
+            self._store_message(message, "received")
+        self._request(
+            f"/messages/{quote(self.phone_number, safe='')}/ack",
+            "POST",
+            {"message_ids": message_ids},
+        )
+        for message_id in message_ids:
+            self._processed_incoming.pop(message_id, None)
+        self._save_crypto_state()
 
     def _load_or_create_crypto_state(self):
         """Restore or initialize encrypted identity, pre-keys, and sessions."""
@@ -226,6 +257,7 @@ class MessagingClient:
         self._session_headers = {}
         self._incoming_sessions = {}
         self._incoming_headers = {}
+        self._processed_incoming = state.get("processed_incoming", {})
         for recipient_id, session in state.get("sessions", {}).items():
             self._sessions[recipient_id] = _deserialize_session_state(session["state"])
             self._session_headers[recipient_id] = _deserialize_session_header(session["header"])
@@ -267,6 +299,7 @@ class MessagingClient:
                 }
                 for (peer_id, session_id), session in self._incoming_sessions.items()
             ],
+            "processed_incoming": self._processed_incoming,
         }
         temporary_path = self.crypto_state_path.with_suffix(".tmp")
         temporary_path.write_text(json.dumps(state, sort_keys=True))
@@ -319,6 +352,10 @@ class MessagingClient:
 
     def _decrypt_envelope_locked(self, message):
         """Decrypt one envelope and advance its receive chain after verification."""
+        delivery_id = message["message_id"]
+        previously_processed = self._processed_incoming.get(delivery_id)
+        if previously_processed is not None:
+            return dict(previously_processed)
         envelope = json.loads(message["content"])
         sender_id = message["sender_id"]
         header = _deserialize_session_header(envelope["header"])
@@ -349,9 +386,11 @@ class MessagingClient:
         if new_session:
             self._incoming_sessions[session_key] = state
             self._incoming_headers[session_key] = header
-        self._save_crypto_state()
         decrypted = dict(message)
         decrypted["content"] = plaintext.decode()
+        decrypted.pop("client_message_id", None)
+        self._processed_incoming[delivery_id] = decrypted
+        self._save_crypto_state()
         return decrypted
 
     def history(self):
