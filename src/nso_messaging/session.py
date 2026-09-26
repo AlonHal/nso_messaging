@@ -171,6 +171,17 @@ class SessionState:
     identity_public_key: bytes
 
 
+@dataclass
+class Session:
+    """One established session's chain state paired with its handshake header.
+
+    Replaces tracking state and header in two separate, index-aligned dicts.
+    """
+
+    state: SessionState
+    header: SessionHeader
+
+
 def serialize_session_header(header: SessionHeader) -> dict[str, str | None]:
     """Encode handshake public-key fields for envelope or local-state JSON."""
     return {
@@ -214,6 +225,22 @@ def deserialize_session_state(data: dict) -> SessionState:
     )
 
 
+def serialize_session(session: Session) -> dict:
+    """Encode a paired session state and header for local persistence."""
+    return {
+        "state": serialize_session_state(session.state),
+        "header": serialize_session_header(session.header),
+    }
+
+
+def deserialize_session(data: dict) -> Session:
+    """Restore a paired session state and header from local-state JSON."""
+    return Session(
+        state=deserialize_session_state(data["state"]),
+        header=deserialize_session_header(data["header"]),
+    )
+
+
 def verify_signed_pre_key(bundle: PublicPreKeyBundle) -> bool:
     """Verify the signed X25519 pre-key using the Ed25519 identity key."""
     try:
@@ -222,6 +249,111 @@ def verify_signed_pre_key(bundle: PublicPreKeyBundle) -> bool:
     except (InvalidSignature, ValueError, TypeError):
         raise ValueError("signed pre-key signature is invalid") from None
     return True
+
+
+# Domain-separation prefixes for the two companion-linking signatures, per the
+# assignment's companion pairing bonus section.
+_COMPANION_LINK_PREFIX = b"\x06\x00"
+_COMPANION_ACK_PREFIX = b"\x06\x01"
+
+
+@dataclass
+class CompanionLinkCertificate:
+    """Proof that a companion device's identity is linked to a primary device.
+
+    ``primary_signature`` (A_signature) is the primary vouching for the
+    companion's identity key; ``companion_signature`` (D_signature) is the
+    companion countersigning that same link. A sender must verify both
+    before establishing a session with a companion device.
+    """
+
+    primary_identity_ed25519_public_key: bytes
+    companion_identity_ed25519_public_key: bytes
+    metadata: bytes
+    primary_signature: bytes
+    companion_signature: bytes
+
+
+def sign_companion_link(
+    primary_identity: IdentityKeyPair,
+    companion_identity_ed25519_public_key: bytes,
+    metadata: bytes,
+) -> bytes:
+    """Compute A_signature: the primary vouching for a companion's identity key."""
+    return primary_identity.ed25519_private_key.sign(
+        _COMPANION_LINK_PREFIX + metadata + companion_identity_ed25519_public_key
+    )
+
+
+def sign_companion_acknowledgement(
+    companion_identity: IdentityKeyPair,
+    primary_identity_ed25519_public_key: bytes,
+    metadata: bytes,
+) -> bytes:
+    """Compute D_signature: the companion countersigning acceptance of the link."""
+    return companion_identity.ed25519_private_key.sign(
+        _COMPANION_ACK_PREFIX
+        + metadata
+        + companion_identity.ed25519_public_bytes
+        + primary_identity_ed25519_public_key
+    )
+
+
+def verify_companion_link_certificate(certificate: CompanionLinkCertificate) -> bool:
+    """Verify both the primary's and companion's signatures over a link certificate."""
+    try:
+        primary_verifier = ed25519.Ed25519PublicKey.from_public_bytes(
+            certificate.primary_identity_ed25519_public_key
+        )
+        primary_verifier.verify(
+            certificate.primary_signature,
+            _COMPANION_LINK_PREFIX
+            + certificate.metadata
+            + certificate.companion_identity_ed25519_public_key,
+        )
+        companion_verifier = ed25519.Ed25519PublicKey.from_public_bytes(
+            certificate.companion_identity_ed25519_public_key
+        )
+        companion_verifier.verify(
+            certificate.companion_signature,
+            _COMPANION_ACK_PREFIX
+            + certificate.metadata
+            + certificate.companion_identity_ed25519_public_key
+            + certificate.primary_identity_ed25519_public_key,
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        raise ValueError("companion link certificate is invalid") from None
+    return True
+
+
+def serialize_companion_link_certificate(certificate: CompanionLinkCertificate) -> dict:
+    """Encode a companion link certificate as JSON-safe base64 strings."""
+    return {
+        "primary_identity_ed25519_public_key": encode_bytes(
+            certificate.primary_identity_ed25519_public_key
+        ),
+        "companion_identity_ed25519_public_key": encode_bytes(
+            certificate.companion_identity_ed25519_public_key
+        ),
+        "metadata": encode_bytes(certificate.metadata),
+        "primary_signature": encode_bytes(certificate.primary_signature),
+        "companion_signature": encode_bytes(certificate.companion_signature),
+    }
+
+
+def deserialize_companion_link_certificate(data: dict) -> CompanionLinkCertificate:
+    """Decode a JSON-safe certificate produced by :func:`serialize_companion_link_certificate`."""
+    return CompanionLinkCertificate(
+        primary_identity_ed25519_public_key=decode_bytes(
+            data["primary_identity_ed25519_public_key"]
+        ),
+        companion_identity_ed25519_public_key=decode_bytes(
+            data["companion_identity_ed25519_public_key"]
+        ),
+        metadata=decode_bytes(data["metadata"]),
+        primary_signature=decode_bytes(data["primary_signature"]),
+        companion_signature=decode_bytes(data["companion_signature"]),
+    )
 
 
 def establish_initiator_session(
