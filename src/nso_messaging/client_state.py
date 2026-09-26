@@ -30,6 +30,7 @@ class ClientCryptoState:
     """
 
     def __init__(self, state_dir: Path, fingerprint: str):
+        """Bind this state to a device fingerprint's directory under ``state_dir``."""
         self.directory = state_dir / "crypto" / fingerprint
         self.path = self.directory / "state.json"
         self.lock_path = self.directory / "state.lock"
