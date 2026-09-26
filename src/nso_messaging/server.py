@@ -109,6 +109,8 @@ class MessagingServer:
         outer = self
 
         class RequestHandler(BaseHTTPRequestHandler):
+            """Route one HTTP request against the enclosing server's shared state."""
+
             timeout = socket_timeout
 
             def do_GET(self):
