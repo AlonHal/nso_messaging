@@ -14,6 +14,7 @@ from nso_messaging.session import (
 
 
 def test_signed_pre_key_bundle_verifies_and_one_time_key_is_consumed():
+    """Verify signed bundle authenticity and single-use private pre-key removal."""
     recipient = PreKeyBundle.generate(one_time_pre_key_count=1)
     bundle = recipient.public_bundle()
 
@@ -24,6 +25,7 @@ def test_signed_pre_key_bundle_verifies_and_one_time_key_is_consumed():
 
 
 def test_session_setup_derives_matching_directional_chains():
+    """Verify initiator and responder derive matching directional chains."""
     initiator = IdentityKeyPair.generate()
     recipient = PreKeyBundle.generate(one_time_pre_key_count=1)
     public_bundle = recipient.public_bundle()
@@ -37,6 +39,7 @@ def test_session_setup_derives_matching_directional_chains():
 
 
 def test_invalid_signed_pre_key_is_rejected():
+    """Reject a bundle whose signed pre-key signature does not verify."""
     recipient = PreKeyBundle.generate(one_time_pre_key_count=1)
     bundle = recipient.public_bundle()
     bundle.signed_pre_key_signature = bytes(len(bundle.signed_pre_key_signature))
@@ -46,6 +49,7 @@ def test_invalid_signed_pre_key_is_rejected():
 
 
 def test_public_bundle_round_trips_through_json_safe_serialization():
+    """Verify public bundle serialization preserves all published key fields."""
     recipient = PreKeyBundle.generate(one_time_pre_key_count=2)
     bundle = recipient.public_bundle()
 
