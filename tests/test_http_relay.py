@@ -126,6 +126,43 @@ def test_message_is_delivered_once_without_server_chat_history(running_server):
     assert not (running_server.data_dir / "messages").exists()
 
 
+def test_repeated_message_id_is_idempotent(running_server):
+    sender = register(running_server, "+15550033")
+    recipient = register(running_server, "+15550034")
+    envelope = {
+        "message_id": "client-message-1",
+        "sender_id": sender["phone_number"],
+        "recipient_id": recipient["phone_number"],
+        "content": "retry safely",
+        "sent_at": "2026-09-25T12:00:00Z",
+    }
+
+    first_status, first_response = authenticated_request_json(
+        running_server.base_url + "/messages",
+        sender["phone_number"],
+        sender["auth_key"],
+        "POST",
+        envelope,
+    )
+    second_status, second_response = authenticated_request_json(
+        running_server.base_url + "/messages",
+        sender["phone_number"],
+        sender["auth_key"],
+        "POST",
+        envelope,
+    )
+
+    assert first_status == second_status == 202
+    assert second_response == first_response
+    _, delivered = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550034",
+        recipient["phone_number"],
+        recipient["auth_key"],
+    )
+    assert len(delivered) == 1
+    assert delivered[0]["message_id"] == "client-message-1"
+
+
 def test_incomplete_message_envelope_is_rejected(running_server):
     sender = register(running_server, "+15550008")
     recipient = register(running_server, "+15550009")

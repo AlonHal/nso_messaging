@@ -48,6 +48,7 @@ class MessagingServer:
         self._registrations = self._load_registrations()
         self._bundles = self._load_bundles()
         self._messages: dict[str, list[dict]] = {}
+        self._message_receipts: dict[tuple[str, str], dict] = {}
         self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
         self.http_server.messaging_server = self
         bound_host, bound_port = self.http_server.server_address
@@ -310,15 +311,28 @@ class MessagingServer:
                         logger.warning("message rejected: recipient is not registered")
                         self._send_error(404, "recipient is not registered")
                         return
+                    client_message_id = payload.get("message_id")
+                    receipt_key = (sender_id, client_message_id)
+                    if isinstance(client_message_id, str) and client_message_id:
+                        existing_receipt = outer._message_receipts.get(receipt_key)
+                        if existing_receipt is not None:
+                            self._send_json(202, existing_receipt)
+                            return
                     message = dict(payload)
-                    message["message_id"] = str(uuid.uuid4())
+                    message["message_id"] = (
+                        client_message_id if isinstance(client_message_id, str) and client_message_id
+                        else str(uuid.uuid4())
+                    )
                     # The queue is deliberately transient; polling removes messages.
                     outer._messages.setdefault(recipient_id, []).append(message)
+                    receipt = {
+                        "message_id": message["message_id"],
+                        "recipient_id": recipient_id,
+                    }
+                    if isinstance(client_message_id, str) and client_message_id:
+                        outer._message_receipts[receipt_key] = receipt
                 logger.info("message queued; pending recipient queues=%d", len(outer._messages))
-                self._send_json(202, {
-                    "message_id": message["message_id"],
-                    "recipient_id": recipient_id,
-                })
+                self._send_json(202, receipt)
 
             def _deliver_messages(self, recipient_id):
                 """Deliver and remove all currently queued envelopes for a recipient.

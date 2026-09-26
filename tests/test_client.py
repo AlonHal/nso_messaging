@@ -1,4 +1,5 @@
 import threading
+import urllib.error
 
 import pytest
 
@@ -134,3 +135,34 @@ def test_encrypted_clients_can_cross_initiate_before_polling(running_server, tmp
 
     assert bob.receive()[0]["content"] == "hello from Alice"
     assert alice.receive()[0]["content"] == "hello from Bob"
+
+
+def test_encrypted_send_retries_transient_transport_failure(
+    running_server, tmp_path, monkeypatch
+):
+    alice = MessagingClient(
+        running_server.base_url, "+15550035", tmp_path / "alice-retry", encryption_enabled=True
+    )
+    bob = MessagingClient(
+        running_server.base_url, "+15550036", tmp_path / "bob-retry", encryption_enabled=True
+    )
+    alice.register()
+    bob.register()
+    original_urlopen = urllib.request.urlopen
+    failed_once = False
+
+    def flaky_urlopen(request, timeout):
+        nonlocal failed_once
+        if request.full_url.endswith("/messages") and not failed_once:
+            failed_once = True
+            raise urllib.error.URLError("temporary transport failure")
+        return original_urlopen(request, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", flaky_urlopen)
+
+    sent = alice.send("+15550036", "retry me")
+    received = bob.receive()
+
+    assert failed_once
+    assert received[0]["content"] == sent["content"] == "retry me"
+    assert len(bob.receive()) == 0

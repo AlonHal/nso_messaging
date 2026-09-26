@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import sqlite3
+import urllib.error
 import urllib.request
 import uuid
 from contextlib import closing
@@ -251,7 +252,6 @@ class MessagingClient:
             self._session_headers[recipient_id] = header
         message_key, next_chain_key = derive_message_key(state.send_chain_key)
         ciphertext, mac = encrypt_message(message_key, content.encode())
-        state.send_chain_key = next_chain_key
         envelope = {
             "version": 1,
             "header": _serialize_session_header(self._session_headers[recipient_id]),
@@ -265,7 +265,8 @@ class MessagingClient:
             "content": json.dumps(envelope, separators=(",", ":")),
             "sent_at": datetime.now(UTC).isoformat(),
         }
-        response = self._request("/messages", "POST", message)
+        response = self._request("/messages", "POST", message, retries=1)
+        state.send_chain_key = next_chain_key
         message["message_id"] = response["message_id"]
         message["content"] = content
         self._store_message(message, "sent")
@@ -373,7 +374,7 @@ class MessagingClient:
                 ),
             )
 
-    def _request(self, path: str, method: str = "GET", payload=None):
+    def _request(self, path: str, method: str = "GET", payload=None, *, retries: int = 0):
         """Send one JSON HTTP request without logging request bodies.
 
         Keeping transport in one helper gives future encryption and retry logic
@@ -395,5 +396,10 @@ class MessagingClient:
             method=method,
             headers=headers,
         )
-        with urllib.request.urlopen(request, timeout=self.request_timeout) as response:
-            return json.load(response)
+        for attempt in range(retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.request_timeout) as response:
+                    return json.load(response)
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == retries:
+                    raise
