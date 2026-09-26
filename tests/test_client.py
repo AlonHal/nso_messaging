@@ -166,3 +166,30 @@ def test_encrypted_send_retries_transient_transport_failure(
     assert failed_once
     assert received[0]["content"] == sent["content"] == "retry me"
     assert len(bob.receive()) == 0
+
+
+def test_shared_client_state_serializes_session_updates(running_server, tmp_path):
+    alice_dir = tmp_path / "alice-shared"
+    bob_dir = tmp_path / "bob-shared"
+    alice = MessagingClient(running_server.base_url, "+15550039", alice_dir, encryption_enabled=True)
+    bob = MessagingClient(running_server.base_url, "+15550040", bob_dir, encryption_enabled=True)
+    alice.register()
+    bob.register()
+    alice.send("+15550040", "establish session")
+    assert bob.receive()[0]["content"] == "establish session"
+
+    first_process = MessagingClient(
+        running_server.base_url, "+15550039", alice_dir, encryption_enabled=True
+    )
+    second_process = MessagingClient(
+        running_server.base_url, "+15550039", alice_dir, encryption_enabled=True
+    )
+    first_process.send("+15550040", "first process")
+    second_process.send("+15550040", "second process")
+
+    received = bob.receive()
+
+    assert [message["content"] for message in received] == [
+        "first process",
+        "second process",
+    ]
