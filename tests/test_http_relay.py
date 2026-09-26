@@ -117,6 +117,13 @@ def test_message_is_delivered_once_without_server_chat_history(running_server):
     assert delivered[0]["content"] == "hello"
     assert delivered[0]["message_id"] == response["message_id"]
 
+    authenticated_request_json(
+        running_server.base_url + "/messages/+15550004/ack",
+        recipient["phone_number"],
+        recipient["auth_key"],
+        "POST",
+        {"message_ids": [response["message_id"]]},
+    )
     _, empty = authenticated_request_json(
         running_server.base_url + "/messages/+15550004",
         recipient["phone_number"],
@@ -124,6 +131,51 @@ def test_message_is_delivered_once_without_server_chat_history(running_server):
     )
     assert empty == []
     assert not (running_server.data_dir / "messages").exists()
+
+
+def test_polling_is_non_destructive_until_acknowledged(running_server):
+    sender = register(running_server, "+15550037")
+    recipient = register(running_server, "+15550038")
+    envelope = {
+        "sender_id": sender["phone_number"],
+        "recipient_id": recipient["phone_number"],
+        "content": "ack me",
+        "sent_at": "2026-09-25T12:00:00Z",
+    }
+    authenticated_request_json(
+        running_server.base_url + "/messages",
+        sender["phone_number"],
+        sender["auth_key"],
+        "POST",
+        envelope,
+    )
+
+    _, first_poll = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550038",
+        recipient["phone_number"],
+        recipient["auth_key"],
+    )
+    _, repeated_poll = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550038",
+        recipient["phone_number"],
+        recipient["auth_key"],
+    )
+    _, acknowledged = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550038/ack",
+        recipient["phone_number"],
+        recipient["auth_key"],
+        "POST",
+        {"message_ids": [first_poll[0]["message_id"]]},
+    )
+    _, after_ack = authenticated_request_json(
+        running_server.base_url + "/messages/%2B15550038",
+        recipient["phone_number"],
+        recipient["auth_key"],
+    )
+
+    assert repeated_poll == first_poll
+    assert acknowledged == {"acknowledged": 1}
+    assert after_ack == []
 
 
 def test_repeated_message_id_is_idempotent(running_server):

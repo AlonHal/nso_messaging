@@ -132,6 +132,10 @@ class MessagingServer:
                     phone_number = unquote(parsed.path.removeprefix("/bundles/"))
                     self._publish_bundle(phone_number)
                     return
+                if parsed.path.startswith("/messages/") and parsed.path.endswith("/ack"):
+                    recipient_id = unquote(parsed.path.removeprefix("/messages/").removesuffix("/ack"))
+                    self._acknowledge_messages(recipient_id)
+                    return
                 if parsed.path == "/messages":
                     self._queue_message()
                     return
@@ -337,19 +341,48 @@ class MessagingServer:
                 self._send_json(202, receipt)
 
             def _deliver_messages(self, recipient_id):
-                """Deliver and remove all currently queued envelopes for a recipient.
+                """Return a snapshot of queued envelopes without removing them.
 
-                Removing the queue while holding the lock makes polling
-                destructive and prevents two concurrent polls from receiving the
-                same envelope.
+                Clients acknowledge messages only after authentication, decryption,
+                and local persistence succeed.
                 """
                 if self._authenticated_account() != recipient_id:
                     self._send_error(403, "authenticated account does not match recipient")
                     return
                 with outer._lock:
-                    messages = outer._messages.pop(recipient_id, [])
+                    messages = list(outer._messages.get(recipient_id, []))
                 logger.info("messages delivered; count=%d", len(messages))
                 self._send_json(200, messages)
+
+            def _acknowledge_messages(self, recipient_id):
+                """Remove only messages successfully processed by the recipient."""
+                payload = self._read_json(require_auth=True)
+                if payload is None:
+                    return
+                if self._authenticated_account() != recipient_id:
+                    self._send_error(403, "authenticated account does not match recipient")
+                    return
+                message_ids = payload.get("message_ids")
+                if (
+                    not isinstance(message_ids, list)
+                    or not message_ids
+                    or any(not isinstance(message_id, str) or not message_id for message_id in message_ids)
+                ):
+                    self._send_error(400, "message_ids must be a non-empty list of strings")
+                    return
+                requested_ids = set(message_ids)
+                with outer._lock:
+                    queued_messages = outer._messages.get(recipient_id, [])
+                    remaining_messages = [
+                        message for message in queued_messages
+                        if message["message_id"] not in requested_ids
+                    ]
+                    acknowledged_count = len(queued_messages) - len(remaining_messages)
+                    if remaining_messages:
+                        outer._messages[recipient_id] = remaining_messages
+                    else:
+                        outer._messages.pop(recipient_id, None)
+                self._send_json(200, {"acknowledged": acknowledged_count})
 
             def _send_json(self, status, payload):
                 """Write a JSON response with consistent HTTP metadata."""

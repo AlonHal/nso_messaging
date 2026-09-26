@@ -186,11 +186,19 @@ class MessagingClient:
         harmless if a caller retries its history operation.
         """
         messages = self._request(f"/messages/{self.phone_number}")
+        acknowledged_ids = []
         for index, message in enumerate(messages):
             if self.encryption_enabled:
                 message = self._decrypt_envelope(message)
                 messages[index] = message
             self._store_message(message, "received")
+            acknowledged_ids.append(message["message_id"])
+        if acknowledged_ids:
+            self._request(
+                f"/messages/{quote(self.phone_number, safe='')}/ack",
+                "POST",
+                {"message_ids": acknowledged_ids},
+            )
         logger.info("messages received; count=%d", len(messages))
         return messages
 
@@ -281,20 +289,26 @@ class MessagingClient:
         session_id = _session_id(header)
         session_key = (sender_id, session_id)
         state = self._incoming_sessions.get(session_key)
-        new_session = False
-        if state is None:
-            state = establish_responder_session(
-                self.pre_key_bundle,
-                header.identity_public_key,
-                header,
+        available_pre_keys = None
+        try:
+            new_session = state is None
+            if new_session:
+                available_pre_keys = dict(self.pre_key_bundle.one_time_pre_keys)
+                state = establish_responder_session(
+                    self.pre_key_bundle,
+                    header.identity_public_key,
+                    header,
+                )
+            message_key, next_chain_key = derive_message_key(state.receive_chain_key)
+            plaintext = decrypt_message(
+                message_key,
+                _unb64(envelope["ciphertext"]),
+                _unb64(envelope["mac"]),
             )
-            new_session = True
-        message_key, next_chain_key = derive_message_key(state.receive_chain_key)
-        plaintext = decrypt_message(
-            message_key,
-            _unb64(envelope["ciphertext"]),
-            _unb64(envelope["mac"]),
-        )
+        except (ValueError, KeyError, TypeError):
+            if available_pre_keys is not None:
+                self.pre_key_bundle.one_time_pre_keys = available_pre_keys
+            raise
         state.receive_chain_key = next_chain_key
         if new_session:
             self._incoming_sessions[session_key] = state
