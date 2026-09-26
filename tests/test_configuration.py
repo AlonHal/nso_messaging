@@ -4,11 +4,13 @@ from nso_messaging.client import MessagingClient
 
 
 def test_collaborator_client_is_explicitly_reserved_for_future_support(tmp_path):
+    """Keep unsupported companion-client construction explicit."""
     with pytest.raises(NotImplementedError, match="primary client role"):
         MessagingClient("http://127.0.0.1:8000", "+15550030", tmp_path, client_role="companion")
 
 
 def test_encryption_flag_initializes_an_encrypted_client(tmp_path):
+    """Initialize one stable client identity with its encrypted pre-key bundle."""
     client = MessagingClient(
         "http://127.0.0.1:8000",
         "+15550031",

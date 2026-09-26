@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import uuid
 from dataclasses import dataclass
 
@@ -12,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .crypto import derive_initial_keys
+from .encoding import decode_bytes, encode_bytes
 
 
 @dataclass
@@ -91,12 +91,12 @@ class PreKeyBundle:
 def serialize_public_bundle(bundle: PublicPreKeyBundle) -> dict:
     """Encode a public bundle as JSON-safe base64 strings for HTTP transport."""
     return {
-        "identity_x25519_public_key": _b64(bundle.identity_x25519_public_key),
-        "identity_ed25519_public_key": _b64(bundle.identity_ed25519_public_key),
-        "signed_pre_key": _b64(bundle.signed_pre_key),
-        "signed_pre_key_signature": _b64(bundle.signed_pre_key_signature),
+        "identity_x25519_public_key": encode_bytes(bundle.identity_x25519_public_key),
+        "identity_ed25519_public_key": encode_bytes(bundle.identity_ed25519_public_key),
+        "signed_pre_key": encode_bytes(bundle.signed_pre_key),
+        "signed_pre_key_signature": encode_bytes(bundle.signed_pre_key_signature),
         "one_time_pre_keys": [
-            {"key_id": entry["key_id"], "public_key": _b64(entry["public_key"])}
+            {"key_id": entry["key_id"], "public_key": encode_bytes(entry["public_key"])}
             for entry in bundle.one_time_pre_keys
         ],
     }
@@ -105,12 +105,12 @@ def serialize_public_bundle(bundle: PublicPreKeyBundle) -> dict:
 def deserialize_public_bundle(data: dict) -> PublicPreKeyBundle:
     """Decode a JSON-safe bundle produced by :func:`serialize_public_bundle`."""
     return PublicPreKeyBundle(
-        identity_x25519_public_key=_unb64(data["identity_x25519_public_key"]),
-        identity_ed25519_public_key=_unb64(data["identity_ed25519_public_key"]),
-        signed_pre_key=_unb64(data["signed_pre_key"]),
-        signed_pre_key_signature=_unb64(data["signed_pre_key_signature"]),
+        identity_x25519_public_key=decode_bytes(data["identity_x25519_public_key"]),
+        identity_ed25519_public_key=decode_bytes(data["identity_ed25519_public_key"]),
+        signed_pre_key=decode_bytes(data["signed_pre_key"]),
+        signed_pre_key_signature=decode_bytes(data["signed_pre_key_signature"]),
         one_time_pre_keys=[
-            {"key_id": entry["key_id"], "public_key": _unb64(entry["public_key"])}
+            {"key_id": entry["key_id"], "public_key": decode_bytes(entry["public_key"])}
             for entry in data["one_time_pre_keys"]
         ],
     )
@@ -119,12 +119,12 @@ def deserialize_public_bundle(data: dict) -> PublicPreKeyBundle:
 def serialize_private_bundle(bundle: PreKeyBundle) -> dict:
     """Encode client-owned identity and pre-key material for local storage."""
     return {
-        "identity_x25519_private_key": _b64(_raw_private_bytes(bundle.identity.x25519_private_key)),
-        "identity_ed25519_private_key": _b64(_raw_private_bytes(bundle.identity.ed25519_private_key)),
-        "signed_pre_key": _b64(_raw_private_bytes(bundle.signed_pre_key)),
-        "signed_pre_key_signature": _b64(bundle.signed_pre_key_signature),
+        "identity_x25519_private_key": encode_bytes(_raw_private_bytes(bundle.identity.x25519_private_key)),
+        "identity_ed25519_private_key": encode_bytes(_raw_private_bytes(bundle.identity.ed25519_private_key)),
+        "signed_pre_key": encode_bytes(_raw_private_bytes(bundle.signed_pre_key)),
+        "signed_pre_key_signature": encode_bytes(bundle.signed_pre_key_signature),
         "one_time_pre_keys": {
-            key_id: _b64(_raw_private_bytes(key))
+            key_id: encode_bytes(_raw_private_bytes(key))
             for key_id, key in bundle.one_time_pre_keys.items()
         },
     }
@@ -135,31 +135,21 @@ def deserialize_private_bundle(data: dict) -> PreKeyBundle:
     return PreKeyBundle(
         identity=IdentityKeyPair(
             x25519.X25519PrivateKey.from_private_bytes(
-                _unb64(data["identity_x25519_private_key"])
+                decode_bytes(data["identity_x25519_private_key"])
             ),
             ed25519.Ed25519PrivateKey.from_private_bytes(
-                _unb64(data["identity_ed25519_private_key"])
+                decode_bytes(data["identity_ed25519_private_key"])
             ),
         ),
         signed_pre_key=x25519.X25519PrivateKey.from_private_bytes(
-            _unb64(data["signed_pre_key"])
+            decode_bytes(data["signed_pre_key"])
         ),
-        signed_pre_key_signature=_unb64(data["signed_pre_key_signature"]),
+        signed_pre_key_signature=decode_bytes(data["signed_pre_key_signature"]),
         one_time_pre_keys={
-            key_id: x25519.X25519PrivateKey.from_private_bytes(_unb64(encoded))
+            key_id: x25519.X25519PrivateKey.from_private_bytes(decode_bytes(encoded))
             for key_id, encoded in data["one_time_pre_keys"].items()
         },
     )
-
-
-def _b64(raw: bytes) -> str:
-    """Base64-encode raw key bytes for JSON transport."""
-    return base64.b64encode(raw).decode("ascii")
-
-
-def _unb64(encoded: str) -> bytes:
-    """Decode a base64 string produced by :func:`_b64`."""
-    return base64.b64decode(encoded)
 
 
 @dataclass
@@ -179,6 +169,49 @@ class SessionState:
     send_chain_key: bytes
     receive_chain_key: bytes
     identity_public_key: bytes
+
+
+def serialize_session_header(header: SessionHeader) -> dict[str, str | None]:
+    """Encode handshake public-key fields for envelope or local-state JSON."""
+    return {
+        "identity_public_key": encode_bytes(header.identity_public_key),
+        "ephemeral_public_key": encode_bytes(header.ephemeral_public_key),
+        "one_time_pre_key_id": header.one_time_pre_key_id,
+    }
+
+
+def deserialize_session_header(data: dict) -> SessionHeader:
+    """Restore a session header from its JSON representation."""
+    return SessionHeader(
+        identity_public_key=decode_bytes(data["identity_public_key"]),
+        ephemeral_public_key=decode_bytes(data["ephemeral_public_key"]),
+        one_time_pre_key_id=data.get("one_time_pre_key_id"),
+    )
+
+
+def session_id_for_header(header: SessionHeader) -> str:
+    """Use the initiator's ephemeral public key as the session identifier."""
+    return encode_bytes(header.ephemeral_public_key)
+
+
+def serialize_session_state(state: SessionState) -> dict[str, str]:
+    """Encode root and directional chain keys for local persistence."""
+    return {
+        "root_key": encode_bytes(state.root_key),
+        "send_chain_key": encode_bytes(state.send_chain_key),
+        "receive_chain_key": encode_bytes(state.receive_chain_key),
+        "identity_public_key": encode_bytes(state.identity_public_key),
+    }
+
+
+def deserialize_session_state(data: dict) -> SessionState:
+    """Restore root and directional chain keys from local-state JSON."""
+    return SessionState(
+        root_key=decode_bytes(data["root_key"]),
+        send_chain_key=decode_bytes(data["send_chain_key"]),
+        receive_chain_key=decode_bytes(data["receive_chain_key"]),
+        identity_public_key=decode_bytes(data["identity_public_key"]),
+    )
 
 
 def verify_signed_pre_key(bundle: PublicPreKeyBundle) -> bool:

@@ -1,90 +1,21 @@
-import base64
-import hashlib
-import hmac
 import json
 import threading
 import urllib.error
-import urllib.request
 
 import pytest
+from http_helpers import (
+    authenticated_request_json,
+    authenticated_request_raw,
+    register,
+    request_json,
+)
 
 from nso_messaging.server import MessagingServer
 from nso_messaging.session import PreKeyBundle, serialize_public_bundle
 
 
-@pytest.fixture
-def running_server(tmp_path):
-    server = MessagingServer("127.0.0.1", 0, tmp_path)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server
-    finally:
-        server.shutdown()
-        thread.join(timeout=2)
-
-
-def request_json(url, method="GET", payload=None):
-    data = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=2) as response:
-        return response.status, json.load(response)
-
-
-def authenticated_request_json(url, account_id, auth_key, method="GET", payload=None):
-    data = None if payload is None else json.dumps(payload).encode()
-    path = url[url.index("/", len("http://")) :]
-    signing_input = method.encode() + b"\n" + path.encode() + b"\n" + (data or b"")
-    secret = base64.urlsafe_b64decode(auth_key.encode())
-    signature = hmac.new(secret, signing_input, hashlib.sha256).hexdigest()
-    request = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
-        headers={
-            "Content-Type": "application/json",
-            "X-Auth-Account": account_id,
-            "X-Auth-Signature": signature,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=2) as response:
-        return response.status, json.load(response)
-
-
-def authenticated_request_raw(url, account_id, auth_key, body, method="POST"):
-    path = url[url.index("/", len("http://")) :]
-    signing_input = method.encode() + b"\n" + path.encode() + b"\n" + body
-    secret = base64.urlsafe_b64decode(auth_key.encode())
-    signature = hmac.new(secret, signing_input, hashlib.sha256).hexdigest()
-    request = urllib.request.Request(
-        url,
-        data=body,
-        method=method,
-        headers={
-            "Content-Type": "application/json",
-            "X-Auth-Account": account_id,
-            "X-Auth-Signature": signature,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=2) as response:
-        return response.status, json.load(response)
-
-
-def register(server, phone_number):
-    _, account = request_json(
-        server.base_url + "/register",
-        "POST",
-        {"phone_number": phone_number},
-    )
-    return account
-
-
 def test_message_is_delivered_once_without_server_chat_history(running_server):
+    """Verify queued delivery and explicit ACK do not create server chat history."""
     sender = register(running_server, "+15550003")
     recipient = register(running_server, "+15550004")
     envelope = {
@@ -134,6 +65,7 @@ def test_message_is_delivered_once_without_server_chat_history(running_server):
 
 
 def test_polling_is_non_destructive_until_acknowledged(running_server):
+    """Keep a message available across polls until the recipient acknowledges it."""
     sender = register(running_server, "+15550037")
     recipient = register(running_server, "+15550038")
     envelope = {
@@ -179,6 +111,7 @@ def test_polling_is_non_destructive_until_acknowledged(running_server):
 
 
 def test_repeated_message_id_is_idempotent(running_server):
+    """Return the original receipt and queue only one submission on retry."""
     sender = register(running_server, "+15550033")
     recipient = register(running_server, "+15550034")
     envelope = {
@@ -218,6 +151,7 @@ def test_repeated_message_id_is_idempotent(running_server):
 
 
 def test_sender_scoped_client_ids_get_distinct_delivery_ids(running_server):
+    """Keep sender-local idempotency IDs separate from unique delivery IDs."""
     first_sender = register(running_server, "+15550043")
     second_sender = register(running_server, "+15550044")
     recipient = register(running_server, "+15550045")
@@ -259,6 +193,7 @@ def test_sender_scoped_client_ids_get_distinct_delivery_ids(running_server):
 
 
 def test_incomplete_message_envelope_is_rejected(running_server):
+    """Reject incomplete submissions without discarding already queued messages."""
     sender = register(running_server, "+15550008")
     recipient = register(running_server, "+15550009")
     authenticated_request_json(
@@ -297,6 +232,7 @@ def test_incomplete_message_envelope_is_rejected(running_server):
 
 
 def test_non_object_message_body_is_rejected(running_server):
+    """Reject authenticated message bodies that decode to non-object JSON."""
     sender = register(running_server, "+15550012")
     register(running_server, "+15550013")
 
@@ -312,6 +248,7 @@ def test_non_object_message_body_is_rejected(running_server):
 
 
 def test_message_requests_require_hmac_and_bind_sender_to_authenticated_account(running_server):
+    """Reject unsigned submissions and authenticated sender impersonation."""
     _, alice = request_json(
         running_server.base_url + "/register",
         "POST",
@@ -345,6 +282,7 @@ def test_message_requests_require_hmac_and_bind_sender_to_authenticated_account(
 
 
 def test_polling_requires_authenticated_recipient_and_preserves_queue(running_server):
+    """Prevent one account from reading or consuming another account's queue."""
     sender = register(running_server, "+15550031")
     recipient = register(running_server, "+15550032")
     authenticated_request_json(
@@ -377,6 +315,7 @@ def test_polling_requires_authenticated_recipient_and_preserves_queue(running_se
 
 
 def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(running_server):
+    """Serve exactly one public pre-key per fetch and consume it from storage."""
     account = register(running_server, "+15550014")
     bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle())
 
@@ -411,6 +350,7 @@ def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(runnin
 
 
 def test_invalid_signed_bundle_is_rejected(running_server):
+    """Reject public bundles with an invalid signed-pre-key signature."""
     account = register(running_server, "+15550025")
     bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=1).public_bundle())
     bundle["signed_pre_key_signature"] = "AA=="
@@ -428,6 +368,7 @@ def test_invalid_signed_bundle_is_rejected(running_server):
 
 
 def test_republishing_a_consumed_one_time_pre_key_is_rejected(running_server):
+    """Reject replayed bundle publication after key consumption and restart."""
     account = register(running_server, "+15550041")
     original_bundle = serialize_public_bundle(
         PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle()
@@ -479,6 +420,7 @@ def test_republishing_a_consumed_one_time_pre_key_is_rejected(running_server):
 
 
 def test_duplicate_one_time_pre_key_ids_are_rejected(running_server):
+    """Reject a published pre-key batch containing duplicate IDs."""
     account = register(running_server, "+15550042")
     bundle = serialize_public_bundle(
         PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle()
@@ -498,6 +440,7 @@ def test_duplicate_one_time_pre_key_ids_are_rejected(running_server):
 
 
 def test_public_bundles_survive_server_restart(running_server, tmp_path):
+    """Restore published public bundles and remaining one-time keys after restart."""
     account = register(running_server, "+15550028")
     bundle = serialize_public_bundle(PreKeyBundle.generate(one_time_pre_key_count=2).public_bundle())
     authenticated_request_json(
@@ -508,7 +451,7 @@ def test_public_bundles_survive_server_restart(running_server, tmp_path):
         bundle,
     )
 
-    restarted_server = MessagingServer("127.0.0.1", 0, tmp_path)
+    restarted_server = MessagingServer("127.0.0.1", 0, running_server.data_dir)
     thread = threading.Thread(target=restarted_server.serve_forever, daemon=True)
     thread.start()
     try:
