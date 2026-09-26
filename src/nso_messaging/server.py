@@ -1,7 +1,11 @@
 """HTTP registration and message relay for the primary-client foundation."""
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
+import secrets
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +13,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .config import DEFAULT_SOCKET_TIMEOUT
+from .session import deserialize_public_bundle, serialize_public_bundle, verify_signed_pre_key
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +43,12 @@ class MessagingServer:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._registrations_path = self.data_dir / "registrations.json"
+        self._bundles_path = self.data_dir / "pre_key_bundles.json"
         self._lock = threading.RLock()
         self._registrations = self._load_registrations()
+        self._bundles, self._consumed_pre_key_ids = self._load_bundle_store()
         self._messages: dict[str, list[dict]] = {}
+        self._message_receipts: dict[tuple[str, str], dict] = {}
         self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
         self.http_server.messaging_server = self
         bound_host, bound_port = self.http_server.server_address
@@ -70,6 +78,31 @@ class MessagingServer:
         temporary_path.write_text(json.dumps(self._registrations, indent=2, sort_keys=True))
         temporary_path.replace(self._registrations_path)
 
+    def _load_bundle_store(self) -> tuple[dict[str, dict], dict[str, set[str]]]:
+        """Load public bundles and their served-key ledger, accepting the legacy format."""
+        if not self._bundles_path.exists():
+            return {}, {}
+        stored_data = json.loads(self._bundles_path.read_text())
+        if stored_data.get("version") == 1 and "bundles" in stored_data:
+            bundles = stored_data["bundles"]
+            consumed_ids = stored_data.get("consumed_pre_key_ids", {})
+            return bundles, {account_id: set(key_ids) for account_id, key_ids in consumed_ids.items()}
+        return stored_data, {}
+
+    def _save_bundles(self):
+        """Persist bundles and served-key history together with atomic replacement."""
+        temporary_path = self._bundles_path.with_suffix(".tmp")
+        stored_data = {
+            "version": 1,
+            "bundles": self._bundles,
+            "consumed_pre_key_ids": {
+                account_id: sorted(key_ids)
+                for account_id, key_ids in self._consumed_pre_key_ids.items()
+            },
+        }
+        temporary_path.write_text(json.dumps(stored_data, indent=2, sort_keys=True))
+        temporary_path.replace(self._bundles_path)
+
     def _handler(self, socket_timeout: float | None = None):
         """Build a request handler bound to this server's state.
 
@@ -88,8 +121,16 @@ class MessagingServer:
                 if parsed.path == "/health":
                     self._send_json(200, {"status": "ok"})
                     return
+                if parsed.path.startswith("/bundles/"):
+                    phone_number = unquote(parsed.path.removeprefix("/bundles/"))
+                    if not self._require_auth():
+                        return
+                    self._fetch_bundle(phone_number)
+                    return
                 if parsed.path.startswith("/messages/"):
                     recipient_id = unquote(parsed.path.removeprefix("/messages/"))
+                    if not self._require_auth():
+                        return
                     self._deliver_messages(recipient_id)
                     return
                 self._send_error(404, "Not found")
@@ -100,6 +141,14 @@ class MessagingServer:
                 if parsed.path == "/register":
                     self._register()
                     return
+                if parsed.path.startswith("/bundles/"):
+                    phone_number = unquote(parsed.path.removeprefix("/bundles/"))
+                    self._publish_bundle(phone_number)
+                    return
+                if parsed.path.startswith("/messages/") and parsed.path.endswith("/ack"):
+                    recipient_id = unquote(parsed.path.removeprefix("/messages/").removesuffix("/ack"))
+                    self._acknowledge_messages(recipient_id)
+                    return
                 if parsed.path == "/messages":
                     self._queue_message()
                     return
@@ -108,11 +157,15 @@ class MessagingServer:
             def log_message(self, format, *args):
                 logger.info("http request: " + format, *args)
 
-            def _read_json(self):
+            def _read_json(self, *, require_auth=False):
                 """Decode a request body without logging its potentially sensitive content."""
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
-                    payload = json.loads(self.rfile.read(length))
+                    raw_body = self.rfile.read(length)
+                    if require_auth and not self._is_authenticated(raw_body):
+                        self._send_error(401, "valid HMAC credentials are required")
+                        return None
+                    payload = json.loads(raw_body)
                 except (ValueError, json.JSONDecodeError):
                     self._send_error(400, "Request body must be valid JSON")
                     return None
@@ -120,6 +173,35 @@ class MessagingServer:
                     self._send_error(400, "Request body must be a JSON object")
                     return None
                 return payload
+
+            def _is_authenticated(self, body):
+                """Verify the request signature and return its authenticated account."""
+                account_id = self.headers.get("X-Auth-Account")
+                signature = self.headers.get("X-Auth-Signature")
+                if not account_id or not signature:
+                    return False
+                with outer._lock:
+                    account = outer._registrations.get(account_id)
+                if account is None or "auth_key" not in account:
+                    return False
+                try:
+                    secret = base64.urlsafe_b64decode(account["auth_key"].encode())
+                except (ValueError, TypeError):
+                    return False
+                signed_data = self.command.encode() + b"\n" + self.path.encode() + b"\n" + body
+                expected = hmac.new(secret, signed_data, hashlib.sha256).hexdigest()
+                return hmac.compare_digest(expected, signature)
+
+            def _require_auth(self):
+                """Verify an empty-body request and return whether it is authorized."""
+                if self._is_authenticated(b""):
+                    return True
+                self._send_error(401, "valid HMAC credentials are required")
+                return False
+
+            def _authenticated_account(self):
+                """Return the account named by the request's authentication header."""
+                return self.headers.get("X-Auth-Account")
 
             def _register(self):
                 """Validate and persist one account registration.
@@ -143,9 +225,6 @@ class MessagingServer:
                 if type(encryption_enabled) is not bool:
                     self._send_error(400, "encryption_enabled must be a boolean")
                     return
-                if encryption_enabled:
-                    self._send_error(400, "encrypted messaging is not implemented yet")
-                    return
                 name = payload.get("name")
                 if name is not None and not isinstance(name, str):
                     self._send_error(400, "name must be a string or null")
@@ -155,6 +234,7 @@ class MessagingServer:
                     "name": name,
                     "client_role": client_role,
                     "encryption_enabled": encryption_enabled,
+                    "auth_key": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"),
                 }
                 with outer._lock:
                     if phone_number in outer._registrations:
@@ -166,6 +246,73 @@ class MessagingServer:
                 logger.info("account registered; total accounts=%d", len(outer._registrations))
                 self._send_json(201, account)
 
+            def _publish_bundle(self, phone_number):
+                """Store only a validated public pre-key bundle for an account."""
+                payload = self._read_json(require_auth=True)
+                if payload is None:
+                    return
+                if self._authenticated_account() != phone_number:
+                    self._send_error(403, "authenticated account does not match bundle owner")
+                    return
+                with outer._lock:
+                    if phone_number not in outer._registrations:
+                        self._send_error(404, "phone_number is not registered")
+                        return
+                try:
+                    bundle = deserialize_public_bundle(payload)
+                    verify_signed_pre_key(bundle)
+                    public_payload = serialize_public_bundle(bundle)
+                except (KeyError, TypeError, ValueError, IndexError):
+                    self._send_error(400, "public pre-key bundle is invalid")
+                    return
+                key_ids = [entry["key_id"] for entry in public_payload["one_time_pre_keys"]]
+                if any(not isinstance(key_id, str) or not key_id for key_id in key_ids):
+                    self._send_error(400, "one-time pre-key IDs must be non-empty strings")
+                    return
+                if len(key_ids) != len(set(key_ids)):
+                    self._send_error(400, "one-time pre-key IDs must be unique")
+                    return
+                with outer._lock:
+                    # This exercise has no bundle-rotation operation; immutability also protects legacy stores without served-key history.
+                    if phone_number in outer._bundles:
+                        self._send_error(409, "a pre-key bundle is already published for this account")
+                        return
+                    consumed_ids = outer._consumed_pre_key_ids.get(phone_number, set())
+                    if consumed_ids.intersection(key_ids):
+                        self._send_error(409, "bundle reintroduces a consumed one-time pre-key")
+                        return
+                    outer._bundles[phone_number] = public_payload
+                    outer._save_bundles()
+                logger.info("public pre-key bundle published")
+                self._send_json(201, {
+                    "phone_number": phone_number,
+                    "one_time_pre_key_count": len(public_payload["one_time_pre_keys"]),
+                })
+
+            def _fetch_bundle(self, phone_number):
+                """Return a bundle and consume at most one one-time pre-key."""
+                with outer._lock:
+                    if phone_number not in outer._registrations:
+                        self._send_error(404, "phone_number is not registered")
+                        return
+                    payload = outer._bundles.get(phone_number)
+                    if payload is None:
+                        self._send_error(404, "public pre-key bundle is not published")
+                        return
+                    payload = dict(payload)
+                    available_pre_keys = outer._bundles[phone_number]["one_time_pre_keys"]
+                    if available_pre_keys:
+                        selected_pre_key = available_pre_keys.pop(0)
+                        payload["one_time_pre_keys"] = [selected_pre_key]
+                        outer._consumed_pre_key_ids.setdefault(phone_number, set()).add(
+                            selected_pre_key["key_id"]
+                        )
+                        outer._save_bundles()
+                    else:
+                        payload["one_time_pre_keys"] = []
+                logger.info("public pre-key bundle fetched")
+                self._send_json(200, payload)
+
             def _queue_message(self):
                 """Queue an envelope for a registered recipient.
 
@@ -173,7 +320,7 @@ class MessagingServer:
                 fields as opaque. That keeps the current plaintext foundation
                 compatible with the future encrypted-envelope contract.
                 """
-                payload = self._read_json()
+                payload = self._read_json(require_auth=True)
                 if payload is None:
                     return
                 sender_id = payload.get("sender_id")
@@ -189,6 +336,9 @@ class MessagingServer:
                 if not isinstance(sent_at, str) or not sent_at:
                     self._send_error(400, "sent_at is required and must be a non-empty string")
                     return
+                if self._authenticated_account() != sender_id:
+                    self._send_error(403, "authenticated account does not match sender_id")
+                    return
                 with outer._lock:
                     if sender_id not in outer._registrations:
                         logger.warning("message rejected: sender is not registered")
@@ -198,27 +348,77 @@ class MessagingServer:
                         logger.warning("message rejected: recipient is not registered")
                         self._send_error(404, "recipient is not registered")
                         return
+                    client_message_id = payload.get("client_message_id", payload.get("message_id"))
+                    if client_message_id is not None and (
+                        not isinstance(client_message_id, str) or not client_message_id
+                    ):
+                        self._send_error(400, "client_message_id must be a non-empty string")
+                        return
+                    if client_message_id is not None:
+                        receipt_key = (sender_id, client_message_id)
+                        existing_receipt = outer._message_receipts.get(receipt_key)
+                        if existing_receipt is not None:
+                            self._send_json(202, existing_receipt)
+                            return
                     message = dict(payload)
+                    message.pop("message_id", None)
+                    if client_message_id is not None:
+                        message["client_message_id"] = client_message_id
                     message["message_id"] = str(uuid.uuid4())
                     # The queue is deliberately transient; polling removes messages.
                     outer._messages.setdefault(recipient_id, []).append(message)
+                    receipt = {
+                        "message_id": message["message_id"],
+                        "recipient_id": recipient_id,
+                    }
+                    if client_message_id is not None:
+                        outer._message_receipts[receipt_key] = receipt
                 logger.info("message queued; pending recipient queues=%d", len(outer._messages))
-                self._send_json(202, {
-                    "message_id": message["message_id"],
-                    "recipient_id": recipient_id,
-                })
+                self._send_json(202, receipt)
 
             def _deliver_messages(self, recipient_id):
-                """Deliver and remove all currently queued envelopes for a recipient.
+                """Return a snapshot of queued envelopes without removing them.
 
-                Removing the queue while holding the lock makes polling
-                destructive and prevents two concurrent polls from receiving the
-                same envelope.
+                Clients acknowledge messages only after authentication, decryption,
+                and local persistence succeed.
                 """
+                if self._authenticated_account() != recipient_id:
+                    self._send_error(403, "authenticated account does not match recipient")
+                    return
                 with outer._lock:
-                    messages = outer._messages.pop(recipient_id, [])
+                    messages = list(outer._messages.get(recipient_id, []))
                 logger.info("messages delivered; count=%d", len(messages))
                 self._send_json(200, messages)
+
+            def _acknowledge_messages(self, recipient_id):
+                """Remove only messages successfully processed by the recipient."""
+                payload = self._read_json(require_auth=True)
+                if payload is None:
+                    return
+                if self._authenticated_account() != recipient_id:
+                    self._send_error(403, "authenticated account does not match recipient")
+                    return
+                message_ids = payload.get("message_ids")
+                if (
+                    not isinstance(message_ids, list)
+                    or not message_ids
+                    or any(not isinstance(message_id, str) or not message_id for message_id in message_ids)
+                ):
+                    self._send_error(400, "message_ids must be a non-empty list of strings")
+                    return
+                requested_ids = set(message_ids)
+                with outer._lock:
+                    queued_messages = outer._messages.get(recipient_id, [])
+                    remaining_messages = [
+                        message for message in queued_messages
+                        if message["message_id"] not in requested_ids
+                    ]
+                    acknowledged_count = len(queued_messages) - len(remaining_messages)
+                    if remaining_messages:
+                        outer._messages[recipient_id] = remaining_messages
+                    else:
+                        outer._messages.pop(recipient_id, None)
+                self._send_json(200, {"acknowledged": acknowledged_count})
 
             def _send_json(self, status, payload):
                 """Write a JSON response with consistent HTTP metadata."""
