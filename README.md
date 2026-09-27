@@ -2,7 +2,7 @@
 
 A small Python server-client foundation for the take-home encrypted messaging assignment. The current implementation provides device identities, primary and certificate-linked companion registration, an HTTP relay server, local client chat history, and a CLI.
 
-The client supports authenticated HTTP requests and optional encrypted message envelopes. Device-scoped key records are supported; multi-device message fan-out and DH ratcheting are not implemented yet.
+The client supports authenticated HTTP requests and optional encrypted message envelopes. Device-scoped key records and encrypted multi-device fan-out are supported; DH ratcheting is not implemented.
 
 ## Requirements
 
@@ -181,16 +181,16 @@ You can also run both a client and the server under the debugger at the same tim
 
 ### Extending Timeouts While Debugging
 
-Pausing at a breakpoint inside the server can take longer than a client's default 5-second HTTP request timeout, causing the client to raise a timeout error before you finish stepping through code. Extend both sides with `--request-timeout` (client commands) and `--socket-timeout` (`serve`), or set them once in a JSON config file:
+Pausing at a breakpoint inside the server can take longer than a client's default 5-second HTTP request timeout. CLI commands and clients constructed directly in tests or Python code use the same JSON configuration. For a long timeout, set `request_timeout` to a number; use `null` to wait without a client request timeout:
 
 ```json
 {
-  "request_timeout": 600,
-  "socket_timeout": 600
+  "request_timeout": null,
+  "socket_timeout": null
 }
 ```
 
-Point the CLI at it with `--config path/to/file.json` (must be given *before* the subcommand, e.g. `nso-messaging --config file.json serve`), or place it at `nso-messaging.config.json` in the current directory, or set `NSO_MESSAGING_CONFIG`. CLI flags always take precedence over the config file. The debug launch configs in `.vscode/launch.json` already pass generous timeouts so breakpoints don't trip client-side timeouts.
+Place the file at `nso-messaging.config.json` in the current directory or set `NSO_MESSAGING_CONFIG` to its path. The default `running_server` test fixture already has no socket read timeout. To set a per-client timeout in a test, pass `request_timeout=600` to `MessagingClient`; explicit constructor values take precedence over the global configuration. CLI flags likewise take precedence over the config file.
 
 A `nso-messaging` console script is also installed into `.venv/bin` (via `[project.scripts]` in `pyproject.toml`), so commands can be run directly without `python -m`:
 
@@ -229,13 +229,13 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 
 - The server stores account configuration but does not persist chat history.
 - Public pre-key bundles and one-time-key consumption are persisted in `pre_key_bundles.json` under the server data directory.
-- Message delivery uses a transient in-memory queue and polling.
+- Message delivery uses transient in-memory queues keyed by account and device, with polling and per-device acknowledgments.
 - Registration issues per-device HMAC credentials. The server stores devices under their account, and each device has a stable 16-byte fingerprint-derived ID persisted in `device_identity.json`.
 - Encrypted identity, pre-key, and session state are persisted as readable JSON/Base64 files in the client's state directory; this is a proof of concept, not encrypted-at-rest key storage.
 - Companion registration requires a primary-signed and companion-signed link certificate. The server checks both signatures and verifies that the certificate keys match the registered primary and companion identities.
 - Bundle records are keyed by account and device ID, with one-time pre-keys consumed independently per device.
+- Encrypted sends validate sender/recipient device rosters and create one pairwise encrypted envelope for each encrypted device on both accounts, excluding only the sending device. Each device has an independent session and delivery queue.
 - The CLI supports offer creation, primary link approval, and companion registration; background polling is not implemented.
-- Message queues and message envelopes are still addressed at the account level. Client-side per-device sessions, sender/receiver device fan-out, and companion sender proofs remain upcoming work.
 - Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.
 

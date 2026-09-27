@@ -30,7 +30,7 @@ def load_config(path: str | Path | None = None) -> dict:
     return json.loads(candidate.read_text())
 
 
-def resolve_request_timeout(cli_value: float | None, config: dict) -> float:
+def resolve_request_timeout(cli_value: float | None, config: dict) -> float | None:
     """Resolve the client HTTP request timeout, preferring an explicit CLI value."""
     if cli_value is not None:
         return cli_value
