@@ -1,27 +1,14 @@
-import threading
 import urllib.error
 
 import pytest
 
 from nso_messaging.client import MessagingClient
 from nso_messaging.crypto import AuthenticationError
-from nso_messaging.server import MessagingServer
 from nso_messaging.session import PreKeyBundle
 
 
-@pytest.fixture
-def running_server(tmp_path):
-    server = MessagingServer("127.0.0.1", 0, tmp_path / "server")
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server
-    finally:
-        server.shutdown()
-        thread.join(timeout=2)
-
-
 def test_clients_register_exchange_and_store_local_history(running_server, tmp_path):
+    """Verify plaintext clients exchange messages and retain local history."""
     alice = MessagingClient(running_server.base_url, "+15550010", tmp_path / "alice")
     bob = MessagingClient(running_server.base_url, "+15550011", tmp_path / "bob")
 
@@ -38,6 +25,7 @@ def test_clients_register_exchange_and_store_local_history(running_server, tmp_p
 
 
 def test_client_publishes_and_fetches_public_pre_key_bundle(running_server, tmp_path):
+    """Verify client publication exposes only public bundle material."""
     client = MessagingClient(running_server.base_url, "+15550015", tmp_path / "client")
     client.register()
     private_bundle = PreKeyBundle.generate(one_time_pre_key_count=1)
@@ -52,6 +40,7 @@ def test_client_publishes_and_fetches_public_pre_key_bundle(running_server, tmp_
 
 
 def test_encrypted_clients_exchange_plaintext_only_in_local_history(running_server, tmp_path):
+    """Verify encrypted transport decrypts only for client-local history."""
     alice = MessagingClient(
         running_server.base_url,
         "+15550018",
@@ -77,6 +66,7 @@ def test_encrypted_clients_exchange_plaintext_only_in_local_history(running_serv
 
 
 def test_tampered_encrypted_envelope_fails_before_history_write(running_server, tmp_path):
+    """Ensure authentication failure prevents plaintext history insertion."""
     alice = MessagingClient(
         running_server.base_url, "+15550023", tmp_path / "alice", encryption_enabled=True
     )
@@ -98,6 +88,7 @@ def test_tampered_encrypted_envelope_fails_before_history_write(running_server, 
 
 
 def test_encrypted_receive_retries_ack_without_redecrypting(running_server, tmp_path, monkeypatch):
+    """Ensure a lost ACK response is retried without reusing the receive key."""
     alice = MessagingClient(
         running_server.base_url, "+15550046", tmp_path / "alice-ack-retry", encryption_enabled=True
     )
@@ -113,6 +104,7 @@ def test_encrypted_receive_retries_ack_without_redecrypting(running_server, tmp_
     failed_ack = False
 
     def lose_ack_response(path, method="GET", payload=None, *, retries=0):
+        """Commit the ACK server-side, then simulate losing its response."""
         nonlocal failed_ack
         if path.endswith("/ack") and not failed_ack:
             failed_ack = True
@@ -137,6 +129,7 @@ def test_encrypted_receive_retries_ack_without_redecrypting(running_server, tmp_
 
 
 def test_valid_message_before_malformed_batch_item_is_acknowledged(running_server, tmp_path):
+    """Keep processed messages recoverable when a later batch envelope is invalid."""
     alice = MessagingClient(
         running_server.base_url, "+15550048", tmp_path / "alice-batch", encryption_enabled=True
     )
@@ -166,6 +159,7 @@ def test_valid_message_before_malformed_batch_item_is_acknowledged(running_serve
 
 
 def test_encrypted_state_survives_new_client_instances(running_server, tmp_path):
+    """Verify identity, pre-keys, and session chains survive client restarts."""
     alice_dir = tmp_path / "alice-persistent"
     bob_dir = tmp_path / "bob-persistent"
     alice = MessagingClient(running_server.base_url, "+15550026", alice_dir, encryption_enabled=True)
@@ -189,6 +183,7 @@ def test_encrypted_state_survives_new_client_instances(running_server, tmp_path)
 
 
 def test_encrypted_clients_can_cross_initiate_before_polling(running_server, tmp_path):
+    """Verify independent incoming and outgoing sessions support crossed initiation."""
     alice = MessagingClient(
         running_server.base_url, "+15550029", tmp_path / "alice-crossed", encryption_enabled=True
     )
@@ -208,6 +203,7 @@ def test_encrypted_clients_can_cross_initiate_before_polling(running_server, tmp
 def test_encrypted_send_retries_transient_transport_failure(
     running_server, tmp_path, monkeypatch
 ):
+    """Verify transient send failure retries the same idempotent envelope."""
     alice = MessagingClient(
         running_server.base_url, "+15550035", tmp_path / "alice-retry", encryption_enabled=True
     )
@@ -220,6 +216,7 @@ def test_encrypted_send_retries_transient_transport_failure(
     failed_once = False
 
     def flaky_urlopen(request, timeout):
+        """Fail the first message submission before it reaches the server."""
         nonlocal failed_once
         if request.full_url.endswith("/messages") and not failed_once:
             failed_once = True
@@ -237,6 +234,7 @@ def test_encrypted_send_retries_transient_transport_failure(
 
 
 def test_shared_client_state_serializes_session_updates(running_server, tmp_path):
+    """Verify clients sharing local state serialize session-chain updates."""
     alice_dir = tmp_path / "alice-shared"
     bob_dir = tmp_path / "bob-shared"
     alice = MessagingClient(running_server.base_url, "+15550039", alice_dir, encryption_enabled=True)

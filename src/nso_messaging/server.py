@@ -1,8 +1,6 @@
 """HTTP registration and message relay for the primary-client foundation."""
 
 import base64
-import hashlib
-import hmac
 import json
 import logging
 import secrets
@@ -13,6 +11,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .config import DEFAULT_SOCKET_TIMEOUT
+from .json_store import write_json_atomic
+from .request_auth import verify_request_signature
 from .session import deserialize_public_bundle, serialize_public_bundle, verify_signed_pre_key
 
 logger = logging.getLogger(__name__)
@@ -74,9 +74,7 @@ class MessagingServer:
 
     def _save_registrations(self):
         """Persist registrations atomically so interrupted writes do not corrupt them."""
-        temporary_path = self._registrations_path.with_suffix(".tmp")
-        temporary_path.write_text(json.dumps(self._registrations, indent=2, sort_keys=True))
-        temporary_path.replace(self._registrations_path)
+        write_json_atomic(self._registrations_path, self._registrations, indent=2)
 
     def _load_bundle_store(self) -> tuple[dict[str, dict], dict[str, set[str]]]:
         """Load public bundles and their served-key ledger, accepting the legacy format."""
@@ -91,7 +89,6 @@ class MessagingServer:
 
     def _save_bundles(self):
         """Persist bundles and served-key history together with atomic replacement."""
-        temporary_path = self._bundles_path.with_suffix(".tmp")
         stored_data = {
             "version": 1,
             "bundles": self._bundles,
@@ -100,8 +97,7 @@ class MessagingServer:
                 for account_id, key_ids in self._consumed_pre_key_ids.items()
             },
         }
-        temporary_path.write_text(json.dumps(stored_data, indent=2, sort_keys=True))
-        temporary_path.replace(self._bundles_path)
+        write_json_atomic(self._bundles_path, stored_data, indent=2)
 
     def _handler(self, socket_timeout: float | None = None):
         """Build a request handler bound to this server's state.
@@ -155,6 +151,7 @@ class MessagingServer:
                 self._send_error(404, "Not found")
 
             def log_message(self, format, *args):
+                """Route HTTP access logs through the application's logger."""
                 logger.info("http request: " + format, *args)
 
             def _read_json(self, *, require_auth=False):
@@ -184,13 +181,13 @@ class MessagingServer:
                     account = outer._registrations.get(account_id)
                 if account is None or "auth_key" not in account:
                     return False
-                try:
-                    secret = base64.urlsafe_b64decode(account["auth_key"].encode())
-                except (ValueError, TypeError):
-                    return False
-                signed_data = self.command.encode() + b"\n" + self.path.encode() + b"\n" + body
-                expected = hmac.new(secret, signed_data, hashlib.sha256).hexdigest()
-                return hmac.compare_digest(expected, signature)
+                return verify_request_signature(
+                    account["auth_key"],
+                    self.command,
+                    self.path,
+                    body,
+                    signature,
+                )
 
             def _require_auth(self):
                 """Verify an empty-body request and return whether it is authorized."""

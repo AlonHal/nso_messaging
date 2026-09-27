@@ -1,25 +1,10 @@
 import json
-import threading
-
-import pytest
 
 from nso_messaging.cli import main
-from nso_messaging.server import MessagingServer
-
-
-@pytest.fixture
-def running_server(tmp_path):
-    server = MessagingServer("127.0.0.1", 0, tmp_path / "server")
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server
-    finally:
-        server.shutdown()
-        thread.join(timeout=2)
 
 
 def test_cli_register_send_receive_and_history(running_server, tmp_path, capsys):
+    """Exercise primary registration, message exchange, and local history via CLI."""
     alice_dir = tmp_path / "alice"
     bob_dir = tmp_path / "bob"
     server = running_server.base_url
@@ -42,6 +27,7 @@ def test_cli_register_send_receive_and_history(running_server, tmp_path, capsys)
 
 
 def test_cli_config_option_must_precede_subcommand(running_server, tmp_path, capsys):
+    """Verify the global config option is accepted before a command."""
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"request_timeout": 30}))
     alice_dir = tmp_path / "alice"
@@ -58,6 +44,7 @@ def test_cli_config_option_must_precede_subcommand(running_server, tmp_path, cap
 
 
 def test_cli_resolves_configured_timeout_and_explicit_override(tmp_path, monkeypatch):
+    """Ensure an explicit request timeout overrides the loaded config value."""
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"request_timeout": 30}))
     captured = []

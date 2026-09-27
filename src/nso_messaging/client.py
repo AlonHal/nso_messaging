@@ -1,9 +1,7 @@
 """Primary client with HTTP transport and local SQLite message history."""
 
-import base64
 import fcntl
 import hashlib
-import hmac
 import json
 import logging
 import sqlite3
@@ -17,6 +15,9 @@ from urllib.parse import quote
 
 from .config import DEFAULT_REQUEST_TIMEOUT
 from .crypto import decrypt_message, derive_message_key, encrypt_message
+from .encoding import decode_bytes, encode_bytes
+from .json_store import write_json_atomic
+from .request_auth import sign_request
 from .session import (
     PreKeyBundle,
     PublicPreKeyBundle,
@@ -24,60 +25,18 @@ from .session import (
     SessionState,
     deserialize_private_bundle,
     deserialize_public_bundle,
+    deserialize_session_header,
+    deserialize_session_state,
     establish_initiator_session,
     establish_responder_session,
     serialize_private_bundle,
     serialize_public_bundle,
+    serialize_session_header,
+    serialize_session_state,
+    session_id_for_header,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _b64(raw: bytes) -> str:
-    return base64.b64encode(raw).decode("ascii")
-
-
-def _unb64(encoded: str) -> bytes:
-    return base64.b64decode(encoded)
-
-
-def _serialize_session_header(header: SessionHeader) -> dict:
-    return {
-        "identity_public_key": _b64(header.identity_public_key),
-        "ephemeral_public_key": _b64(header.ephemeral_public_key),
-        "one_time_pre_key_id": header.one_time_pre_key_id,
-    }
-
-
-def _deserialize_session_header(data: dict) -> SessionHeader:
-    return SessionHeader(
-        identity_public_key=_unb64(data["identity_public_key"]),
-        ephemeral_public_key=_unb64(data["ephemeral_public_key"]),
-        one_time_pre_key_id=data.get("one_time_pre_key_id"),
-    )
-
-
-def _session_id(header: SessionHeader) -> str:
-    """Identify an initiated session by its unique ephemeral public key."""
-    return _b64(header.ephemeral_public_key)
-
-
-def _serialize_session_state(state: SessionState) -> dict:
-    return {
-        "root_key": _b64(state.root_key),
-        "send_chain_key": _b64(state.send_chain_key),
-        "receive_chain_key": _b64(state.receive_chain_key),
-        "identity_public_key": _b64(state.identity_public_key),
-    }
-
-
-def _deserialize_session_state(data: dict) -> SessionState:
-    return SessionState(
-        root_key=_unb64(data["root_key"]),
-        send_chain_key=_unb64(data["send_chain_key"]),
-        receive_chain_key=_unb64(data["receive_chain_key"]),
-        identity_public_key=_unb64(data["identity_public_key"]),
-    )
 
 
 class MessagingClient:
@@ -259,12 +218,12 @@ class MessagingClient:
         self._incoming_headers = {}
         self._processed_incoming = state.get("processed_incoming", {})
         for recipient_id, session in state.get("sessions", {}).items():
-            self._sessions[recipient_id] = _deserialize_session_state(session["state"])
-            self._session_headers[recipient_id] = _deserialize_session_header(session["header"])
+            self._sessions[recipient_id] = deserialize_session_state(session["state"])
+            self._session_headers[recipient_id] = deserialize_session_header(session["header"])
         for session in state.get("incoming_sessions", []):
             key = (session["peer_id"], session["session_id"])
-            self._incoming_sessions[key] = _deserialize_session_state(session["state"])
-            self._incoming_headers[key] = _deserialize_session_header(session["header"])
+            self._incoming_sessions[key] = deserialize_session_state(session["state"])
+            self._incoming_headers[key] = deserialize_session_header(session["header"])
 
     @contextmanager
     def _crypto_state_lock(self):
@@ -285,8 +244,8 @@ class MessagingClient:
             "pre_key_bundle": serialize_private_bundle(self.pre_key_bundle),
             "sessions": {
                 recipient_id: {
-                    "state": _serialize_session_state(session),
-                    "header": _serialize_session_header(self._session_headers[recipient_id]),
+                    "state": serialize_session_state(session),
+                    "header": serialize_session_header(self._session_headers[recipient_id]),
                 }
                 for recipient_id, session in self._sessions.items()
             },
@@ -294,16 +253,14 @@ class MessagingClient:
                 {
                     "peer_id": peer_id,
                     "session_id": session_id,
-                    "state": _serialize_session_state(session),
-                    "header": _serialize_session_header(self._incoming_headers[(peer_id, session_id)]),
+                    "state": serialize_session_state(session),
+                    "header": serialize_session_header(self._incoming_headers[(peer_id, session_id)]),
                 }
                 for (peer_id, session_id), session in self._incoming_sessions.items()
             ],
             "processed_incoming": self._processed_incoming,
         }
-        temporary_path = self.crypto_state_path.with_suffix(".tmp")
-        temporary_path.write_text(json.dumps(state, sort_keys=True))
-        temporary_path.replace(self.crypto_state_path)
+        write_json_atomic(self.crypto_state_path, state)
         self.crypto_state_path.chmod(0o600)
 
     def _send_encrypted(self, recipient_id: str, content: str):
@@ -324,9 +281,9 @@ class MessagingClient:
         ciphertext, mac = encrypt_message(message_key, content.encode())
         envelope = {
             "version": 1,
-            "header": _serialize_session_header(self._session_headers[recipient_id]),
-            "ciphertext": _b64(ciphertext),
-            "mac": _b64(mac),
+            "header": serialize_session_header(self._session_headers[recipient_id]),
+            "ciphertext": encode_bytes(ciphertext),
+            "mac": encode_bytes(mac),
         }
         message = {
             "client_message_id": str(uuid.uuid4()),
@@ -358,8 +315,8 @@ class MessagingClient:
             return dict(previously_processed)
         envelope = json.loads(message["content"])
         sender_id = message["sender_id"]
-        header = _deserialize_session_header(envelope["header"])
-        session_id = _session_id(header)
+        header = deserialize_session_header(envelope["header"])
+        session_id = session_id_for_header(header)
         session_key = (sender_id, session_id)
         state = self._incoming_sessions.get(session_key)
         available_pre_keys = None
@@ -375,8 +332,8 @@ class MessagingClient:
             message_key, next_chain_key = derive_message_key(state.receive_chain_key)
             plaintext = decrypt_message(
                 message_key,
-                _unb64(envelope["ciphertext"]),
-                _unb64(envelope["mac"]),
+                decode_bytes(envelope["ciphertext"]),
+                decode_bytes(envelope["mac"]),
             )
         except (ValueError, KeyError, TypeError):
             if available_pre_keys is not None:
@@ -437,7 +394,7 @@ class MessagingClient:
 
     def _save_auth_key(self):
         """Persist the transport credential without including it in logs or history."""
-        self.credentials_path.write_text(json.dumps({"auth_key": self.auth_key}))
+        write_json_atomic(self.credentials_path, {"auth_key": self.auth_key})
         self.credentials_path.chmod(0o600)
 
     def _store_message(self, message, direction: str):
@@ -472,9 +429,7 @@ class MessagingClient:
         data = None if payload is None else json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"}
         if self.auth_key is not None:
-            secret = base64.urlsafe_b64decode(self.auth_key.encode())
-            signed_data = method.encode() + b"\n" + path.encode() + b"\n" + (data or b"")
-            signature = hmac.new(secret, signed_data, hashlib.sha256).hexdigest()
+            signature = sign_request(self.auth_key, method, path, data or b"")
             headers.update({
                 "X-Auth-Account": self.phone_number,
                 "X-Auth-Signature": signature,
