@@ -3,10 +3,21 @@ import pytest
 from nso_messaging.client import MessagingClient
 
 
-def test_collaborator_client_is_explicitly_reserved_for_future_support(tmp_path):
-    """Keep unsupported companion-client construction explicit."""
-    with pytest.raises(NotImplementedError, match="primary client role"):
+def test_companion_client_requires_encryption_and_can_be_initialized(tmp_path):
+    """Require a companion to have a device identity and pre-key bundle."""
+    with pytest.raises(ValueError, match="encryption to be enabled"):
         MessagingClient("http://127.0.0.1:8000", "+15550030", tmp_path, client_role="companion")
+
+    client = MessagingClient(
+        "http://127.0.0.1:8000",
+        "+15550030",
+        tmp_path,
+        client_role="companion",
+        encryption_enabled=True,
+    )
+
+    assert client.device_id
+    assert client.pre_key_bundle is not None
 
 
 def test_encryption_flag_initializes_an_encrypted_client(tmp_path):

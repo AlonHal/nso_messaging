@@ -11,9 +11,22 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .config import DEFAULT_SOCKET_TIMEOUT
+from .device_identity import (
+    format_fingerprint,
+    generate_device_fingerprint,
+    validate_device_id,
+)
+from .encoding import decode_bytes, encode_bytes
 from .json_store import write_json_atomic
 from .request_auth import verify_request_signature
-from .session import deserialize_public_bundle, serialize_public_bundle, verify_signed_pre_key
+from .session import (
+    deserialize_companion_link_certificate,
+    deserialize_public_bundle,
+    serialize_companion_link_certificate,
+    serialize_public_bundle,
+    verify_companion_link_certificate,
+    verify_signed_pre_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,25 +89,34 @@ class MessagingServer:
         """Persist registrations atomically so interrupted writes do not corrupt them."""
         write_json_atomic(self._registrations_path, self._registrations, indent=2)
 
-    def _load_bundle_store(self) -> tuple[dict[str, dict], dict[str, set[str]]]:
-        """Load public bundles and their served-key ledger, accepting the legacy format."""
+    def _load_bundle_store(self) -> tuple[dict[str, dict[str, dict]], dict[str, dict[str, set[str]]]]:
+        """Load device-scoped bundles and their served-key ledger."""
         if not self._bundles_path.exists():
             return {}, {}
         stored_data = json.loads(self._bundles_path.read_text())
-        if stored_data.get("version") == 1 and "bundles" in stored_data:
-            bundles = stored_data["bundles"]
-            consumed_ids = stored_data.get("consumed_pre_key_ids", {})
-            return bundles, {account_id: set(key_ids) for account_id, key_ids in consumed_ids.items()}
-        return stored_data, {}
+        if stored_data.get("version") != 2 or not isinstance(stored_data.get("bundles"), dict):
+            raise ValueError("pre-key bundle store must use device-scoped version 2 format")
+        bundles = stored_data["bundles"]
+        consumed_ids = stored_data.get("consumed_pre_key_ids", {})
+        return bundles, {
+            account_id: {
+                device_id: set(key_ids)
+                for device_id, key_ids in device_records.items()
+            }
+            for account_id, device_records in consumed_ids.items()
+        }
 
     def _save_bundles(self):
         """Persist bundles and served-key history together with atomic replacement."""
         stored_data = {
-            "version": 1,
+            "version": 2,
             "bundles": self._bundles,
             "consumed_pre_key_ids": {
-                account_id: sorted(key_ids)
-                for account_id, key_ids in self._consumed_pre_key_ids.items()
+                account_id: {
+                    device_id: sorted(key_ids)
+                    for device_id, key_ids in device_records.items()
+                }
+                for account_id, device_records in self._consumed_pre_key_ids.items()
             },
         }
         write_json_atomic(self._bundles_path, stored_data, indent=2)
@@ -120,10 +142,15 @@ class MessagingServer:
                     self._send_json(200, {"status": "ok"})
                     return
                 if parsed.path.startswith("/bundles/"):
-                    phone_number = unquote(parsed.path.removeprefix("/bundles/"))
+                    parts = parsed.path.removeprefix("/bundles/").split("/")
+                    phone_number = unquote(parts[0])
+                    device_id = unquote(parts[1]) if len(parts) == 2 else None
+                    if len(parts) > 2:
+                        self._send_error(404, "Not found")
+                        return
                     if not self._require_auth():
                         return
-                    self._fetch_bundle(phone_number)
+                    self._fetch_bundle(phone_number, device_id)
                     return
                 if parsed.path.startswith("/messages/"):
                     recipient_id = unquote(parsed.path.removeprefix("/messages/"))
@@ -140,8 +167,13 @@ class MessagingServer:
                     self._register()
                     return
                 if parsed.path.startswith("/bundles/"):
-                    phone_number = unquote(parsed.path.removeprefix("/bundles/"))
-                    self._publish_bundle(phone_number)
+                    parts = parsed.path.removeprefix("/bundles/").split("/")
+                    phone_number = unquote(parts[0])
+                    device_id = unquote(parts[1]) if len(parts) == 2 else None
+                    if len(parts) > 2:
+                        self._send_error(404, "Not found")
+                        return
+                    self._publish_bundle(phone_number, device_id)
                     return
                 if parsed.path.startswith("/messages/") and parsed.path.endswith("/ack"):
                     recipient_id = unquote(parsed.path.removeprefix("/messages/").removesuffix("/ack"))
@@ -181,15 +213,30 @@ class MessagingServer:
                     return False
                 with outer._lock:
                     account = outer._registrations.get(account_id)
-                if account is None or "auth_key" not in account:
+                if account is None:
                     return False
-                return verify_request_signature(
-                    account["auth_key"],
-                    self.command,
-                    self.path,
-                    body,
-                    signature,
-                )
+                requested_device_id = self.headers.get("X-Auth-Device")
+                devices = account.get("devices", {})
+                candidates = []
+                if requested_device_id is not None:
+                    device = devices.get(requested_device_id)
+                    if device is None:
+                        return False
+                    candidates.append((requested_device_id, device.get("auth_key")))
+                else:
+                    candidates.extend(
+                        (device_id, device.get("auth_key"))
+                        for device_id, device in devices.items()
+                    )
+                    if account.get("auth_key"):
+                        candidates.append((account.get("primary_device_id"), account["auth_key"]))
+                for device_id, auth_key in candidates:
+                    if auth_key and verify_request_signature(
+                        auth_key, self.command, self.path, body, signature
+                    ):
+                        self._authenticated_device_id = device_id
+                        return True
+                return False
 
             def _require_auth(self):
                 """Verify an empty-body request and return whether it is authorized."""
@@ -217,8 +264,8 @@ class MessagingServer:
                     self._send_error(400, "phone_number is required")
                     return
                 client_role = payload.get("client_role", "primary")
-                if client_role != "primary":
-                    self._send_error(400, "only the primary client role is supported")
+                if client_role not in {"primary", "companion"}:
+                    self._send_error(400, "client_role must be 'primary' or 'companion'")
                     return
                 encryption_enabled = payload.get("encryption_enabled", False)
                 if type(encryption_enabled) is not bool:
@@ -228,24 +275,109 @@ class MessagingServer:
                 if name is not None and not isinstance(name, str):
                     self._send_error(400, "name must be a string or null")
                     return
-                account = {
-                    "phone_number": phone_number,
-                    "name": name,
-                    "client_role": client_role,
-                    "encryption_enabled": encryption_enabled,
-                    "auth_key": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"),
-                }
-                with outer._lock:
-                    if phone_number in outer._registrations:
-                        logger.warning("registration rejected: duplicate account")
-                        self._send_error(409, "phone_number is already registered")
+                if client_role == "companion" and not encryption_enabled:
+                    self._send_error(400, "companion clients require encryption")
+                    return
+                encoded_identity_key = payload.get("identity_ed25519_public_key")
+                identity_key = None
+                if encryption_enabled:
+                    try:
+                        identity_key = decode_bytes(encoded_identity_key)
+                    except (TypeError, ValueError):
+                        self._send_error(400, "an Ed25519 identity public key is required")
                         return
-                    outer._registrations[phone_number] = account
+                    if len(identity_key) != 32:
+                        self._send_error(400, "Ed25519 identity public key must be 32 bytes")
+                        return
+                device_id = payload.get("device_id")
+                if device_id is None:
+                    device_id = format_fingerprint(generate_device_fingerprint(phone_number))
+                if not isinstance(device_id, str):
+                    self._send_error(400, "device_id must be a valid device fingerprint")
+                    return
+                try:
+                    validate_device_id(device_id, phone_number)
+                except ValueError as error:
+                    self._send_error(400, str(error))
+                    return
+                certificate = None
+                if client_role == "companion":
+                    try:
+                        certificate = deserialize_companion_link_certificate(
+                            payload["link_certificate"]
+                        )
+                        verify_companion_link_certificate(certificate)
+                    except (KeyError, TypeError, ValueError):
+                        self._send_error(400, "companion link certificate is invalid")
+                        return
+                with outer._lock:
+                    account = outer._registrations.get(phone_number)
+                    if client_role == "primary":
+                        if account is not None:
+                            logger.warning("registration rejected: duplicate account")
+                            self._send_error(409, "phone_number is already registered")
+                            return
+                        account = {
+                            "phone_number": phone_number,
+                            "name": name,
+                            "primary_device_id": device_id,
+                            "devices": {},
+                        }
+                    elif account is None:
+                        self._send_error(404, "primary account is not registered")
+                        return
+                    devices = account.setdefault("devices", {})
+                    if device_id in devices:
+                        self._send_error(409, "device_id is already registered")
+                        return
+                    if client_role == "companion":
+                        primary_device_id = account.get("primary_device_id")
+                        primary_device = devices.get(primary_device_id, {})
+                        primary_identity_key = primary_device.get("identity_ed25519_public_key")
+                        if (
+                            primary_identity_key is None
+                            or certificate.primary_identity_ed25519_public_key
+                            != decode_bytes(primary_identity_key)
+                            or certificate.companion_identity_ed25519_public_key != identity_key
+                        ):
+                            self._send_error(400, "companion certificate identities do not match")
+                            return
+                        if any(
+                            device.get("identity_ed25519_public_key")
+                            == encode_bytes(identity_key)
+                            for device in devices.values()
+                        ):
+                            self._send_error(409, "companion identity is already registered")
+                            return
+                    auth_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+                    device = {
+                        "device_id": device_id,
+                        "client_role": client_role,
+                        "encryption_enabled": encryption_enabled,
+                        "auth_key": auth_key,
+                    }
+                    if identity_key is not None:
+                        device["identity_ed25519_public_key"] = encode_bytes(identity_key)
+                    if certificate is not None:
+                        device["link_certificate"] = serialize_companion_link_certificate(
+                            certificate
+                        )
+                    devices[device_id] = device
+                    if client_role == "primary":
+                        account["auth_key"] = auth_key
+                        outer._registrations[phone_number] = account
                     outer._save_registrations()
                 logger.info("account registered; total accounts=%d", len(outer._registrations))
-                self._send_json(201, account)
+                self._send_json(201, {
+                    "phone_number": phone_number,
+                    "name": account.get("name"),
+                    "client_role": client_role,
+                    "encryption_enabled": encryption_enabled,
+                    "device_id": device_id,
+                    "auth_key": auth_key,
+                })
 
-            def _publish_bundle(self, phone_number):
+            def _publish_bundle(self, phone_number, device_id=None):
                 """Store only a validated public pre-key bundle for an account."""
                 payload = self._read_json(require_auth=True)
                 if payload is None:
@@ -254,8 +386,21 @@ class MessagingServer:
                     self._send_error(403, "authenticated account does not match bundle owner")
                     return
                 with outer._lock:
-                    if phone_number not in outer._registrations:
+                    account = outer._registrations.get(phone_number)
+                    if account is None:
                         self._send_error(404, "phone_number is not registered")
+                        return
+                    device_id = device_id or self._authenticated_device_id or account.get(
+                        "primary_device_id"
+                    )
+                    if (
+                        self._authenticated_device_id is not None
+                        and self._authenticated_device_id != device_id
+                    ):
+                        self._send_error(403, "authenticated device does not match bundle owner")
+                        return
+                    if device_id not in account.get("devices", {}):
+                        self._send_error(404, "device_id is not registered")
                         return
                 try:
                     bundle = deserialize_public_bundle(payload)
@@ -273,37 +418,48 @@ class MessagingServer:
                     return
                 with outer._lock:
                     # This exercise has no bundle-rotation operation; immutability also protects legacy stores without served-key history.
-                    if phone_number in outer._bundles:
-                        self._send_error(409, "a pre-key bundle is already published for this account")
+                    account_bundles = outer._bundles.setdefault(phone_number, {})
+                    if device_id in account_bundles:
+                        self._send_error(409, "a pre-key bundle is already published for this device")
                         return
-                    consumed_ids = outer._consumed_pre_key_ids.get(phone_number, set())
+                    consumed_ids = outer._consumed_pre_key_ids.get(phone_number, {}).get(
+                        device_id, set()
+                    )
                     if consumed_ids.intersection(key_ids):
                         self._send_error(409, "bundle reintroduces a consumed one-time pre-key")
                         return
-                    outer._bundles[phone_number] = public_payload
+                    account_bundles[device_id] = public_payload
                     outer._save_bundles()
                 logger.info("public pre-key bundle published")
                 self._send_json(201, {
                     "phone_number": phone_number,
+                    "device_id": device_id,
                     "one_time_pre_key_count": len(public_payload["one_time_pre_keys"]),
                 })
 
-            def _fetch_bundle(self, phone_number):
+            def _fetch_bundle(self, phone_number, device_id=None):
                 """Return a bundle and consume at most one one-time pre-key."""
                 with outer._lock:
-                    if phone_number not in outer._registrations:
+                    account = outer._registrations.get(phone_number)
+                    if account is None:
                         self._send_error(404, "phone_number is not registered")
                         return
-                    payload = outer._bundles.get(phone_number)
+                    device_id = device_id or account.get("primary_device_id")
+                    if device_id not in account.get("devices", {}):
+                        self._send_error(404, "device_id is not registered")
+                        return
+                    payload = outer._bundles.get(phone_number, {}).get(device_id)
                     if payload is None:
-                        self._send_error(404, "public pre-key bundle is not published")
+                        self._send_error(404, "public pre-key bundle is not published for this device")
                         return
                     payload = dict(payload)
-                    available_pre_keys = outer._bundles[phone_number]["one_time_pre_keys"]
+                    available_pre_keys = outer._bundles[phone_number][device_id]["one_time_pre_keys"]
                     if available_pre_keys:
                         selected_pre_key = available_pre_keys.pop(0)
                         payload["one_time_pre_keys"] = [selected_pre_key]
-                        outer._consumed_pre_key_ids.setdefault(phone_number, set()).add(
+                        outer._consumed_pre_key_ids.setdefault(phone_number, {}).setdefault(
+                            device_id, set()
+                        ).add(
                             selected_pre_key["key_id"]
                         )
                         outer._save_bundles()

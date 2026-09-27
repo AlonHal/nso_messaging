@@ -328,7 +328,11 @@ def test_public_bundle_is_published_and_one_time_key_is_consumed_on_fetch(runnin
     )
 
     assert status == 201
-    assert response == {"phone_number": "+15550014", "one_time_pre_key_count": 2}
+    assert response == {
+        "phone_number": "+15550014",
+        "device_id": account["device_id"],
+        "one_time_pre_key_count": 2,
+    }
 
     status, fetched = authenticated_request_json(
         running_server.base_url + "/bundles/%2B15550014",
@@ -385,11 +389,6 @@ def test_republishing_a_consumed_one_time_pre_key_is_rejected(running_server):
         bundle_url,
         account["phone_number"],
         account["auth_key"],
-    )
-
-    legacy_store = {account["phone_number"]: running_server._bundles[account["phone_number"]]}
-    (running_server.data_dir / "pre_key_bundles.json").write_text(
-        json.dumps(legacy_store)
     )
 
     restarted_server = MessagingServer("127.0.0.1", 0, running_server.data_dir)

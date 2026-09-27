@@ -1,6 +1,5 @@
 """Primary client with HTTP transport and local SQLite message history."""
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -15,10 +14,12 @@ from urllib.parse import quote
 from .client_state import ClientCryptoState
 from .config import DEFAULT_REQUEST_TIMEOUT
 from .crypto import decrypt_message, derive_message_key, encrypt_message
+from .device_identity import format_fingerprint, load_or_create_device_fingerprint
 from .encoding import decode_bytes, encode_bytes
 from .json_store import write_json_atomic
 from .request_auth import sign_request
 from .session import (
+    CompanionLinkCertificate,
     PreKeyBundle,
     PublicPreKeyBundle,
     Session,
@@ -26,9 +27,12 @@ from .session import (
     deserialize_session_header,
     establish_initiator_session,
     establish_responder_session,
+    serialize_companion_link_certificate,
+    serialize_device_list,
     serialize_public_bundle,
     serialize_session_header,
     session_id_for_header,
+    sign_device_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,8 +60,10 @@ class MessagingClient:
         respond; raise it (or load a config file) when stepping through server
         code under a debugger so requests don't time out mid-breakpoint.
         """
-        if client_role != "primary":
-            raise NotImplementedError("Only the primary client role is currently supported")
+        if client_role not in {"primary", "companion"}:
+            raise ValueError("client_role must be 'primary' or 'companion'")
+        if client_role == "companion" and not encryption_enabled:
+            raise ValueError("companion clients require encryption to be enabled")
         self.server_url = server_url.rstrip("/")
         self.phone_number = phone_number
         self.client_role = client_role
@@ -65,11 +71,14 @@ class MessagingClient:
         self.request_timeout = request_timeout
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        fingerprint_path = self.state_dir / "device_identity.json"
+        self.device_id = format_fingerprint(
+            load_or_create_device_fingerprint(fingerprint_path, phone_number)
+        )
         self.database_path = self.state_dir / "messages.sqlite3"
         self.credentials_path = self.state_dir / "credentials.json"
         self.auth_key = self._load_auth_key()
-        fingerprint = hashlib.sha256(phone_number.encode()).hexdigest()
-        self._crypto = ClientCryptoState(self.state_dir, fingerprint) if encryption_enabled else None
+        self._crypto = ClientCryptoState(self.state_dir, self.device_id) if encryption_enabled else None
         if self._crypto is not None:
             self._crypto.load_or_create()
         self._initialize_database()
@@ -85,18 +94,40 @@ class MessagingClient:
         """Return this client's private pre-key bundle, if encryption is enabled."""
         return None if self._crypto is None else self._crypto.pre_key_bundle
 
-    def register(self, name: str | None = None):
+    def register(
+        self,
+        name: str | None = None,
+        *,
+        link_certificate: CompanionLinkCertificate | None = None,
+    ):
         """Register this client and return the server's account record.
 
         Registration is intentionally separate from local history creation so a
-        client can be initialized offline before connecting to a server.
+        client can be initialized offline before connecting to a server. A
+        companion must provide the primary-approved, two-signature link certificate.
         """
+        if self.client_role == "companion":
+            if link_certificate is None:
+                raise ValueError("companion registration requires a link certificate")
+            if link_certificate.companion_identity_ed25519_public_key != (
+                self.identity.ed25519_public_bytes
+            ):
+                raise ValueError("link certificate does not identify this companion")
+        elif link_certificate is not None:
+            raise ValueError("primary registration must not include a link certificate")
         payload = {
             "phone_number": self.phone_number,
+            "device_id": self.device_id,
             "name": name,
             "client_role": self.client_role,
             "encryption_enabled": self.encryption_enabled,
         }
+        if self.encryption_enabled:
+            payload["identity_ed25519_public_key"] = encode_bytes(
+                self.identity.ed25519_public_bytes
+            )
+        if link_certificate is not None:
+            payload["link_certificate"] = serialize_companion_link_certificate(link_certificate)
         result = self._request("/register", "POST", payload)
         self.auth_key = result["auth_key"]
         self._save_auth_key()
@@ -108,13 +139,45 @@ class MessagingClient:
     def publish_pre_key_bundle(self, bundle: PreKeyBundle):
         """Publish this client's public pre-key material without private keys."""
         payload = serialize_public_bundle(bundle.public_bundle())
-        return self._request(f"/bundles/{quote(self.phone_number, safe='')}", "POST", payload)
+        return self._request(
+            f"/bundles/{quote(self.phone_number, safe='')}/{self.device_id}",
+            "POST",
+            payload,
+        )
 
-    def fetch_pre_key_bundle(self, recipient_id: str | None = None) -> PublicPreKeyBundle:
-        """Fetch and deserialize one recipient's currently available public bundle."""
+    def fetch_pre_key_bundle(
+        self, recipient_id: str | None = None, *, device_id: str | None = None
+    ) -> PublicPreKeyBundle:
+        """Fetch one device's public bundle, defaulting to an account's primary device."""
         account_id = self.phone_number if recipient_id is None else recipient_id
-        payload = self._request(f"/bundles/{quote(account_id, safe='')}")
+        if device_id is None and account_id == self.phone_number:
+            device_id = self.device_id
+        path = f"/bundles/{quote(account_id, safe='')}"
+        if device_id is not None:
+            path += f"/{device_id}"
+        payload = self._request(path)
         return deserialize_public_bundle(payload)
+
+    def update_device_list(self, companion_identity_ed25519_public_key: bytes) -> dict[str, str]:
+        """Persist a companion identity and return the primary-signed device-list payload."""
+        if self._crypto is None:
+            raise RuntimeError("device linking requires encryption to be enabled")
+        if not isinstance(companion_identity_ed25519_public_key, bytes) or len(
+            companion_identity_ed25519_public_key
+        ) != 32:
+            raise ValueError("companion Ed25519 identity public key must be 32 bytes")
+        with self._crypto.lock():
+            self._crypto.restore()
+            companion_keys = self._crypto.companion_identity_ed25519_public_keys
+            if companion_identity_ed25519_public_key not in companion_keys:
+                companion_keys.append(companion_identity_ed25519_public_key)
+            device_list_data = serialize_device_list(companion_keys)
+            list_signature = sign_device_list(self.identity, device_list_data)
+            self._crypto.save()
+        return {
+            "device_list_data": encode_bytes(device_list_data),
+            "list_signature": encode_bytes(list_signature),
+        }
 
     def send(self, recipient_id: str, content: str):
         """Send one message and store the sent copy locally.
@@ -364,6 +427,7 @@ class MessagingClient:
             signature = sign_request(self.auth_key, method, path, data or b"")
             headers.update({
                 "X-Auth-Account": self.phone_number,
+                "X-Auth-Device": self.device_id,
                 "X-Auth-Signature": signature,
             })
         request = urllib.request.Request(
