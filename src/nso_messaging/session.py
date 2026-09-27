@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -354,6 +358,89 @@ def deserialize_companion_link_certificate(data: dict) -> CompanionLinkCertifica
         primary_signature=decode_bytes(data["primary_signature"]),
         companion_signature=decode_bytes(data["companion_signature"]),
     )
+
+
+# Sizes and domain-separation prefix for the QR-code linking handshake
+# (WhatsApp whitepaper "Client Registration: Option 1, Link Using a QR-Code").
+LINKING_SECRET_SIZE = 32  # L_companion: HMAC key, kept off the server.
+LINK_METADATA_SIZE = 16  # L_metadata: opaque per-link nonce.
+_ED25519_PUBLIC_KEY_SIZE = 32
+_ED25519_SIGNATURE_SIZE = 64
+_DEVICE_LIST_SIGNATURE_PREFIX = b"\x06\x02"
+
+
+def generate_linking_secret() -> bytes:
+    """Generate L_companion, the ephemeral HMAC key shared only via the QR code."""
+    return secrets.token_bytes(LINKING_SECRET_SIZE)
+
+
+def generate_linking_metadata() -> bytes:
+    """Generate L_metadata, an opaque per-link nonce identifying this linking attempt."""
+    return secrets.token_bytes(LINK_METADATA_SIZE)
+
+
+def serialize_linking_data(
+    metadata: bytes,
+    primary_identity_ed25519_public_key: bytes,
+    account_signature: bytes,
+) -> bytes:
+    """Serialize L_data: metadata, I_primary, and A_signature at fixed offsets.
+
+    Every field has a fixed byte length, so the concatenation is unambiguous
+    to parse back with :func:`deserialize_linking_data` without a length
+    prefix or delimiter.
+    """
+    return metadata + primary_identity_ed25519_public_key + account_signature
+
+
+def deserialize_linking_data(linking_data: bytes) -> tuple[bytes, bytes, bytes]:
+    """Split L_data back into ``(metadata, I_primary, A_signature)``."""
+    primary_key_start = LINK_METADATA_SIZE
+    signature_start = primary_key_start + _ED25519_PUBLIC_KEY_SIZE
+    return (
+        linking_data[:primary_key_start],
+        linking_data[primary_key_start:signature_start],
+        linking_data[signature_start : signature_start + _ED25519_SIGNATURE_SIZE],
+    )
+
+
+def compute_linking_hmac(linking_secret: bytes, linking_data: bytes) -> bytes:
+    """Compute PHMAC = HMAC-SHA256(L_companion, L_data)."""
+    return hmac.new(linking_secret, linking_data, hashlib.sha256).digest()
+
+
+def verify_linking_hmac(linking_secret: bytes, linking_data: bytes, expected_hmac: bytes) -> bool:
+    """Verify PHMAC before a companion trusts the primary's forwarded L_data."""
+    if not hmac.compare_digest(compute_linking_hmac(linking_secret, linking_data), expected_hmac):
+        raise ValueError("linking HMAC does not match L_data")
+    return True
+
+
+def serialize_device_list(companion_identity_ed25519_public_keys: list[bytes]) -> bytes:
+    """Encode ListData: the account's currently linked companion identity keys."""
+    encoded_keys = sorted(encode_bytes(key) for key in companion_identity_ed25519_public_keys)
+    return json.dumps(encoded_keys, separators=(",", ":")).encode()
+
+
+def sign_device_list(primary_identity: IdentityKeyPair, device_list_data: bytes) -> bytes:
+    """Compute ListSignature over ListData with the primary's identity key."""
+    return primary_identity.ed25519_private_key.sign(
+        _DEVICE_LIST_SIGNATURE_PREFIX + device_list_data
+    )
+
+
+def verify_device_list_signature(
+    primary_identity_ed25519_public_key: bytes,
+    device_list_data: bytes,
+    list_signature: bytes,
+) -> bool:
+    """Verify ListSignature was produced by the account's primary identity key."""
+    try:
+        verifier = ed25519.Ed25519PublicKey.from_public_bytes(primary_identity_ed25519_public_key)
+        verifier.verify(list_signature, _DEVICE_LIST_SIGNATURE_PREFIX + device_list_data)
+    except (InvalidSignature, ValueError, TypeError):
+        raise ValueError("device list signature is invalid") from None
+    return True
 
 
 def establish_initiator_session(

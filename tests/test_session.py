@@ -3,18 +3,29 @@ import json
 import pytest
 
 from nso_messaging.session import (
+    LINK_METADATA_SIZE,
+    LINKING_SECRET_SIZE,
     CompanionLinkCertificate,
     IdentityKeyPair,
     PreKeyBundle,
+    compute_linking_hmac,
     deserialize_companion_link_certificate,
+    deserialize_linking_data,
     deserialize_public_bundle,
     establish_initiator_session,
     establish_responder_session,
+    generate_linking_metadata,
+    generate_linking_secret,
     serialize_companion_link_certificate,
+    serialize_device_list,
+    serialize_linking_data,
     serialize_public_bundle,
     sign_companion_acknowledgement,
     sign_companion_link,
+    sign_device_list,
     verify_companion_link_certificate,
+    verify_device_list_signature,
+    verify_linking_hmac,
     verify_signed_pre_key,
 )
 
@@ -117,4 +128,69 @@ def test_companion_link_certificate_round_trips_through_json_safe_serialization(
 
     assert restored == certificate
     assert verify_companion_link_certificate(restored)
+
+
+def test_generated_linking_secret_and_metadata_have_documented_sizes():
+    """Verify L_companion and L_metadata match the whitepaper's byte sizes."""
+    assert len(generate_linking_secret()) == LINKING_SECRET_SIZE
+    assert len(generate_linking_metadata()) == LINK_METADATA_SIZE
+
+
+def test_linking_data_round_trips_through_serialization():
+    """Verify L_data serialization preserves metadata, I_primary, and A_signature."""
+    primary = IdentityKeyPair.generate()
+    companion = IdentityKeyPair.generate()
+    metadata = generate_linking_metadata()
+    account_signature = sign_companion_link(primary, companion.ed25519_public_bytes, metadata)
+
+    linking_data = serialize_linking_data(metadata, primary.ed25519_public_bytes, account_signature)
+    restored_metadata, restored_primary_key, restored_signature = deserialize_linking_data(
+        linking_data
+    )
+
+    assert restored_metadata == metadata
+    assert restored_primary_key == primary.ed25519_public_bytes
+    assert restored_signature == account_signature
+
+
+def test_linking_hmac_verifies_with_the_matching_linking_secret():
+    """Verify PHMAC computed over L_data with L_companion authenticates correctly."""
+    linking_secret = generate_linking_secret()
+    linking_data = b"opaque-linking-data-bytes"
+
+    linking_hmac = compute_linking_hmac(linking_secret, linking_data)
+
+    assert verify_linking_hmac(linking_secret, linking_data, linking_hmac)
+
+
+def test_linking_hmac_rejects_a_tampered_linking_secret():
+    """Reject PHMAC verification when the companion's linking secret does not match."""
+    linking_data = b"opaque-linking-data-bytes"
+    linking_hmac = compute_linking_hmac(generate_linking_secret(), linking_data)
+
+    with pytest.raises(ValueError, match="linking HMAC"):
+        verify_linking_hmac(generate_linking_secret(), linking_data, linking_hmac)
+
+
+def test_device_list_signature_verifies_with_the_primary_identity():
+    """Verify ListSignature over ListData authenticates with the primary's identity."""
+    primary = IdentityKeyPair.generate()
+    companion = IdentityKeyPair.generate()
+    device_list = serialize_device_list([companion.ed25519_public_bytes])
+
+    list_signature = sign_device_list(primary, device_list)
+
+    assert verify_device_list_signature(primary.ed25519_public_bytes, device_list, list_signature)
+
+
+def test_device_list_signature_rejects_a_tampered_device_list():
+    """Reject ListSignature verification when ListData was altered after signing."""
+    primary = IdentityKeyPair.generate()
+    companion = IdentityKeyPair.generate()
+    device_list = serialize_device_list([companion.ed25519_public_bytes])
+    list_signature = sign_device_list(primary, device_list)
+    tampered_list = serialize_device_list([companion.ed25519_public_bytes, b"\x00" * 32])
+
+    with pytest.raises(ValueError, match="device list signature"):
+        verify_device_list_signature(primary.ed25519_public_bytes, tampered_list, list_signature)
 
