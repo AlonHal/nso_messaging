@@ -7,9 +7,11 @@
             "request": "launch",
             "module": "nso_messaging",
             "args": [
-                "serve", "--host", "127.0.0.1", "--port", "8000", "--data-dir", "server-data",
-                "--socket-timeout", "600"
+                "serve", "--host", "127.0.0.1", "--port", "8000", "--data-dir", "server-data"
             ],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -24,8 +26,11 @@
                 "--phone", "+10000000000",
                 "--state-dir", "client-data/alice",
                 "--name", "Alice",
-                "--request-timeout", "600"
+                "--encryption-enabled"
             ],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -40,8 +45,11 @@
                 "--phone", "+10000000001",
                 "--state-dir", "client-data/bob",
                 "--name", "Bob",
-                "--request-timeout", "600"
+                "--encryption-enabled"
             ],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -57,8 +65,11 @@
                 "--state-dir", "client-data/alice",
                 "--recipient", "+10000000001",
                 "--message", "hello",
-                "--request-timeout", "600"
+                "--encryption-enabled"
             ],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -71,9 +82,11 @@
                 "receive",
                 "--server", "http://127.0.0.1:8000",
                 "--phone", "+10000000001",
-                "--state-dir", "client-data/bob",
-                "--request-timeout", "600"
+                "--state-dir", "client-data/bob"
             ],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -99,7 +112,11 @@
             "type": "debugpy",
             "request": "launch",
             "module": "pytest",
+            "preLaunchTask": "Clean client and server data",
             "args": ["-vv", "${file}"],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         },
@@ -108,7 +125,11 @@
             "type": "debugpy",
             "request": "launch",
             "module": "pytest",
+            "preLaunchTask": "Clean client and server data",
             "args": ["-vv"],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         }

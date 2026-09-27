@@ -64,8 +64,8 @@ class MessagingServer:
         self._lock = threading.RLock()
         self._registrations = self._load_registrations()
         self._bundles, self._consumed_pre_key_ids = self._load_bundle_store()
-        self._messages: dict[str, list[dict]] = {}
-        self._message_receipts: dict[tuple[str, str], dict] = {}
+        self._messages: dict[tuple[str, str], list[dict]] = {}
+        self._message_receipts: dict[tuple[str, str, str, str, str], dict] = {}
         self.http_server = ThreadingHTTPServer((host, port), self._handler(socket_timeout))
         self.http_server.messaging_server = self
         bound_host, bound_port = self.http_server.server_address
@@ -145,6 +145,12 @@ class MessagingServer:
                 if parsed.path == "/health":
                     self._send_json(200, {"status": "ok"})
                     return
+                if parsed.path.startswith("/devices/"):
+                    if not self._require_auth():
+                        return
+                    phone_number = unquote(parsed.path.removeprefix("/devices/"))
+                    self._get_devices(phone_number)
+                    return
                 if parsed.path.startswith("/link/"):
                     parts = parsed.path.removeprefix("/link/").split("/")
                     if len(parts) != 2:
@@ -164,10 +170,15 @@ class MessagingServer:
                     self._fetch_bundle(phone_number, device_id)
                     return
                 if parsed.path.startswith("/messages/"):
-                    recipient_id = unquote(parsed.path.removeprefix("/messages/"))
+                    route = parsed.path.removeprefix("/messages/").split("/")
+                    if len(route) not in {1, 2}:
+                        self._send_error(404, "Not found")
+                        return
+                    recipient_id = unquote(route[0])
+                    device_id = unquote(route[1]) if len(route) == 2 else None
                     if not self._require_auth():
                         return
-                    self._deliver_messages(recipient_id)
+                    self._deliver_messages(recipient_id, device_id)
                     return
                 self._send_error(404, "Not found")
 
@@ -194,8 +205,13 @@ class MessagingServer:
                     self._publish_link_data(unquote(parts[0]), unquote(parts[1]))
                     return
                 if parsed.path.startswith("/messages/") and parsed.path.endswith("/ack"):
-                    recipient_id = unquote(parsed.path.removeprefix("/messages/").removesuffix("/ack"))
-                    self._acknowledge_messages(recipient_id)
+                    route = parsed.path.removeprefix("/messages/").removesuffix("/ack").split("/")
+                    if len(route) not in {1, 2}:
+                        self._send_error(404, "Not found")
+                        return
+                    recipient_id = unquote(route[0])
+                    device_id = unquote(route[1]) if len(route) == 2 else None
+                    self._acknowledge_messages(recipient_id, device_id)
                     return
                 if parsed.path == "/messages":
                     self._queue_message()
@@ -535,6 +551,39 @@ class MessagingServer:
                     response = dict(pending)
                 self._send_json(200, response)
 
+            def _get_devices(self, phone_number):
+                """Return registered device public identities and linking proofs."""
+                with outer._lock:
+                    account = outer._registrations.get(phone_number)
+                    if account is None:
+                        self._send_error(404, "account is not registered")
+                        return
+                    devices = []
+                    for device in account.get("devices", {}).values():
+                        bundle = outer._bundles.get(phone_number, {}).get(
+                            device["device_id"], {}
+                        )
+                        devices.append({
+                            "device_id": device["device_id"],
+                            "client_role": device["client_role"],
+                            "encryption_enabled": device["encryption_enabled"],
+                            "identity_x25519_public_key": bundle.get(
+                                "identity_x25519_public_key"
+                            ),
+                            "identity_ed25519_public_key": device.get(
+                                "identity_ed25519_public_key"
+                            ),
+                            "link_certificate": device.get("link_certificate"),
+                        })
+                    response = {
+                        "phone_number": phone_number,
+                        "primary_device_id": account.get("primary_device_id"),
+                        "devices": devices,
+                        "device_list_data": account.get("device_list_data"),
+                        "device_list_signature": account.get("device_list_signature"),
+                    }
+                self._send_json(200, response)
+
             def _publish_bundle(self, phone_number, device_id=None):
                 """Store only a validated public pre-key bundle for an account."""
                 payload = self._read_json(require_auth=True)
@@ -576,6 +625,16 @@ class MessagingServer:
                     return
                 with outer._lock:
                     # This exercise has no bundle-rotation operation; immutability also protects legacy stores without served-key history.
+                    device = outer._registrations[phone_number]["devices"][device_id]
+                    registered_identity_key = device.get("identity_ed25519_public_key")
+                    bundle_identity_key = encode_bytes(bundle.identity_ed25519_public_key)
+                    if (
+                        registered_identity_key is not None
+                        and registered_identity_key != bundle_identity_key
+                    ):
+                        self._send_error(400, "bundle identity does not match registered device")
+                        return
+                    device["identity_ed25519_public_key"] = bundle_identity_key
                     account_bundles = outer._bundles.setdefault(phone_number, {})
                     if device_id in account_bundles:
                         self._send_error(409, "a pre-key bundle is already published for this device")
@@ -653,13 +712,39 @@ class MessagingServer:
                     self._send_error(403, "authenticated account does not match sender_id")
                     return
                 with outer._lock:
-                    if sender_id not in outer._registrations:
+                    sender_account = outer._registrations.get(sender_id)
+                    if sender_account is None:
                         logger.warning("message rejected: sender is not registered")
                         self._send_error(404, "sender is not registered")
                         return
-                    if recipient_id not in outer._registrations:
+                    recipient_account = outer._registrations.get(recipient_id)
+                    if recipient_account is None:
                         logger.warning("message rejected: recipient is not registered")
                         self._send_error(404, "recipient is not registered")
+                        return
+                    sender_device_id = payload.get("sender_device_id") or getattr(
+                        self, "_authenticated_device_id", None
+                    ) or sender_account.get("primary_device_id")
+                    recipient_device_id = payload.get("recipient_device_id") or recipient_account.get(
+                        "primary_device_id"
+                    )
+                    if (
+                        not isinstance(sender_device_id, str)
+                        or sender_device_id not in sender_account.get("devices", {})
+                    ):
+                        self._send_error(404, "sender device is not registered")
+                        return
+                    if (
+                        self._authenticated_device_id is not None
+                        and sender_device_id != self._authenticated_device_id
+                    ):
+                        self._send_error(403, "authenticated device does not match sender_device_id")
+                        return
+                    if (
+                        not isinstance(recipient_device_id, str)
+                        or recipient_device_id not in recipient_account.get("devices", {})
+                    ):
+                        self._send_error(404, "recipient device is not registered")
                         return
                     client_message_id = payload.get("client_message_id", payload.get("message_id"))
                     if client_message_id is not None and (
@@ -668,7 +753,13 @@ class MessagingServer:
                         self._send_error(400, "client_message_id must be a non-empty string")
                         return
                     if client_message_id is not None:
-                        receipt_key = (sender_id, client_message_id)
+                        receipt_key = (
+                            sender_id,
+                            sender_device_id,
+                            client_message_id,
+                            recipient_id,
+                            recipient_device_id,
+                        )
                         existing_receipt = outer._message_receipts.get(receipt_key)
                         if existing_receipt is not None:
                             self._send_json(202, existing_receipt)
@@ -677,38 +768,61 @@ class MessagingServer:
                     message.pop("message_id", None)
                     if client_message_id is not None:
                         message["client_message_id"] = client_message_id
+                    message["sender_device_id"] = sender_device_id
+                    message["recipient_device_id"] = recipient_device_id
                     message["message_id"] = str(uuid.uuid4())
                     # The queue is deliberately transient; polling removes messages.
-                    outer._messages.setdefault(recipient_id, []).append(message)
+                    outer._messages.setdefault((recipient_id, recipient_device_id), []).append(
+                        message
+                    )
                     receipt = {
                         "message_id": message["message_id"],
                         "recipient_id": recipient_id,
+                        "recipient_device_id": recipient_device_id,
                     }
                     if client_message_id is not None:
                         outer._message_receipts[receipt_key] = receipt
                 logger.info("message queued; pending recipient queues=%d", len(outer._messages))
                 self._send_json(202, receipt)
 
-            def _deliver_messages(self, recipient_id):
+            def _deliver_messages(self, recipient_id, device_id=None):
                 """Return a snapshot of queued envelopes without removing them.
 
                 Clients acknowledge messages only after authentication, decryption,
                 and local persistence succeed.
                 """
-                if self._authenticated_account() != recipient_id:
+                with outer._lock:
+                    account = outer._registrations.get(recipient_id)
+                    if account is None:
+                        self._send_error(404, "recipient is not registered")
+                        return
+                    device_id = device_id or account.get("primary_device_id")
+                if (
+                    self._authenticated_account() != recipient_id
+                    or self._authenticated_device_id != device_id
+                ):
                     self._send_error(403, "authenticated account does not match recipient")
                     return
                 with outer._lock:
-                    messages = list(outer._messages.get(recipient_id, []))
+                    messages = list(outer._messages.get((recipient_id, device_id), []))
                 logger.info("messages delivered; count=%d", len(messages))
                 self._send_json(200, messages)
 
-            def _acknowledge_messages(self, recipient_id):
+            def _acknowledge_messages(self, recipient_id, device_id=None):
                 """Remove only messages successfully processed by the recipient."""
                 payload = self._read_json(require_auth=True)
                 if payload is None:
                     return
-                if self._authenticated_account() != recipient_id:
+                with outer._lock:
+                    account = outer._registrations.get(recipient_id)
+                    if account is None:
+                        self._send_error(404, "recipient is not registered")
+                        return
+                    device_id = device_id or account.get("primary_device_id")
+                if (
+                    self._authenticated_account() != recipient_id
+                    or self._authenticated_device_id != device_id
+                ):
                     self._send_error(403, "authenticated account does not match recipient")
                     return
                 message_ids = payload.get("message_ids")
@@ -721,16 +835,17 @@ class MessagingServer:
                     return
                 requested_ids = set(message_ids)
                 with outer._lock:
-                    queued_messages = outer._messages.get(recipient_id, [])
+                    queue_key = (recipient_id, device_id)
+                    queued_messages = outer._messages.get(queue_key, [])
                     remaining_messages = [
                         message for message in queued_messages
                         if message["message_id"] not in requested_ids
                     ]
                     acknowledged_count = len(queued_messages) - len(remaining_messages)
                     if remaining_messages:
-                        outer._messages[recipient_id] = remaining_messages
+                        outer._messages[queue_key] = remaining_messages
                     else:
-                        outer._messages.pop(recipient_id, None)
+                        outer._messages.pop(queue_key, None)
                 self._send_json(200, {"acknowledged": acknowledged_count})
 
             def _send_json(self, status, payload):

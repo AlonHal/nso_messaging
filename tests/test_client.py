@@ -1,3 +1,4 @@
+import json
 import urllib.error
 
 import pytest
@@ -32,6 +33,88 @@ def test_clients_register_exchange_and_store_local_history(running_server, tmp_p
     assert bob.history() == [received[0] | {"direction": "received"}]
 
 
+def _link_companion(primary, companion, link_id, directory):
+    """Run the completed POC offer/approve/register flow for one companion."""
+    companion.write_link_offer(link_id, directory=directory)
+    primary.link_companion(link_id, directory=directory)
+    companion.complete_companion_link(link_id, directory=directory)
+
+
+def test_encrypted_send_fans_out_to_each_other_participant_device(running_server, tmp_path):
+    """Encrypt one copy per participant device, excluding only the sending device."""
+    alice = MessagingClient(
+        running_server.base_url, "+15550060", tmp_path / "alice", encryption_enabled=True
+    )
+    alice_companion = MessagingClient(
+        running_server.base_url,
+        alice.phone_number,
+        tmp_path / "alice-companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    bob = MessagingClient(
+        running_server.base_url, "+15550061", tmp_path / "bob", encryption_enabled=True
+    )
+    bob_companion = MessagingClient(
+        running_server.base_url,
+        bob.phone_number,
+        tmp_path / "bob-companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    alice.register()
+    bob.register()
+    _link_companion(alice, alice_companion, "alice-device", tmp_path)
+    _link_companion(bob, bob_companion, "bob-device", tmp_path)
+
+    sent = alice.send(bob.phone_number, "fan out to every other device")
+    bob_messages = bob.receive()
+    bob_companion_messages = bob_companion.receive()
+    alice_companion_messages = alice_companion.receive()
+
+    assert [message["content"] for message in bob_messages] == [sent["content"]]
+    assert [message["content"] for message in bob_companion_messages] == [sent["content"]]
+    assert [message["content"] for message in alice_companion_messages] == [sent["content"]]
+    assert alice.receive() == []
+
+    reply = bob_companion.send(alice.phone_number, "reply from companion")
+    alice_messages = alice.receive()
+    alice_companion_messages = alice_companion.receive()
+    bob_messages = bob.receive()
+
+    assert [message["content"] for message in alice_messages] == [reply["content"]]
+    assert [message["content"] for message in alice_companion_messages] == [reply["content"]]
+    assert [message["content"] for message in bob_messages] == [reply["content"]]
+    assert bob_companion.receive() == []
+
+
+def test_client_lists_account_devices_and_validates_companion_proof(running_server, tmp_path):
+    """Return a roster whose companion identity and signatures match the primary."""
+    primary = MessagingClient(
+        running_server.base_url, "+15550062", tmp_path / "primary", encryption_enabled=True
+    )
+    companion = MessagingClient(
+        running_server.base_url,
+        primary.phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    primary.register()
+    _link_companion(primary, companion, "roster-link", tmp_path)
+
+    roster = primary.fetch_devices(primary.phone_number)
+
+    assert {device["device_id"] for device in roster["devices"]} == {
+        primary.device_id,
+        companion.device_id,
+    }
+    companion_record = next(
+        device for device in roster["devices"] if device["device_id"] == companion.device_id
+    )
+    assert companion_record["client_role"] == "companion"
+
+
 def test_client_registers_a_stable_device_identity(running_server, tmp_path):
     """Verify registration binds a persistent local device ID to its server record."""
     state_dir = tmp_path / "stable-device"
@@ -50,6 +133,24 @@ def test_client_registers_a_stable_device_identity(running_server, tmp_path):
         running_server.base_url, client.phone_number, state_dir, encryption_enabled=True
     )
     assert restarted.device_id == device_id
+
+
+def test_direct_client_uses_global_configured_request_timeout(tmp_path, monkeypatch):
+    """Apply process config to clients constructed directly by debugger tests."""
+    config_path = tmp_path / "debug-timeouts.json"
+    config_path.write_text(json.dumps({"request_timeout": None}))
+    monkeypatch.setenv("NSO_MESSAGING_CONFIG", str(config_path))
+
+    client = MessagingClient("http://localhost", "+15550014", tmp_path / "client")
+    explicit_timeout_client = MessagingClient(
+        "http://localhost",
+        "+15550015",
+        tmp_path / "explicit-client",
+        request_timeout=12,
+    )
+
+    assert client.request_timeout is None
+    assert explicit_timeout_client.request_timeout == 12
 
 
 def test_primary_and_verified_companion_have_separate_server_device_records(
@@ -292,9 +393,10 @@ def test_tampered_encrypted_envelope_fails_before_history_write(running_server, 
     bob.register()
     alice.send("+15550024", "tamper me")
 
-    envelope = running_server._messages["+15550024"][0]["content"]
+    recipient_queue = (bob.phone_number, bob.device_id)
+    envelope = running_server._messages[recipient_queue][0]["content"]
     tampered = envelope.replace("ciphertext", "ciphertext-tampered", 1)
-    running_server._messages["+15550024"][0]["content"] = tampered
+    running_server._messages[recipient_queue][0]["content"] = tampered
 
     with pytest.raises((AuthenticationError, KeyError)):
         bob.receive()
@@ -330,7 +432,7 @@ def test_encrypted_receive_retries_ack_without_redecrypting(running_server, tmp_
     monkeypatch.setattr(bob, "_request", lose_ack_response)
     with pytest.raises(urllib.error.URLError, match="temporary ACK failure"):
         bob.receive()
-    assert running_server._messages.get("+15550047", []) == []
+    assert running_server._messages.get((bob.phone_number, bob.device_id), []) == []
 
     restarted_bob = MessagingClient(
         running_server.base_url, "+15550047", bob_dir, encryption_enabled=True
@@ -356,7 +458,8 @@ def test_valid_message_before_malformed_batch_item_is_acknowledged(running_serve
     alice.send("+15550049", "valid first")
     alice.send("+15550049", "malformed second")
 
-    queued = running_server._messages["+15550049"]
+    recipient_queue = (bob.phone_number, bob.device_id)
+    queued = running_server._messages[recipient_queue]
     malformed_id = queued[1]["message_id"]
     queued[1]["content"] = queued[1]["content"].replace('"mac":"', '"mac":"AAAA', 1)
 
@@ -367,7 +470,7 @@ def test_valid_message_before_malformed_batch_item_is_acknowledged(running_serve
     with pytest.raises((AuthenticationError, ValueError)):
         bob.receive()
 
-    assert [message["message_id"] for message in running_server._messages["+15550049"]] == [
+    assert [message["message_id"] for message in running_server._messages[recipient_queue]] == [
         malformed_id
     ]
     assert [message["content"] for message in bob.history()] == ["valid first"]

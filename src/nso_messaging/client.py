@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from .client_state import ClientCryptoState
 from .companion_link import read_companion_offer, write_companion_offer
-from .config import DEFAULT_REQUEST_TIMEOUT
+from .config import load_config, resolve_request_timeout
 from .crypto import decrypt_message, derive_message_key, encrypt_message
 from .device_identity import format_fingerprint, load_or_create_device_fingerprint
 from .encoding import decode_bytes, encode_bytes
@@ -25,6 +25,7 @@ from .session import (
     PublicPreKeyBundle,
     Session,
     compute_linking_hmac,
+    deserialize_companion_link_certificate,
     deserialize_linking_data,
     deserialize_public_bundle,
     deserialize_session_header,
@@ -41,6 +42,7 @@ from .session import (
     sign_companion_acknowledgement,
     sign_companion_link,
     sign_device_list,
+    verify_companion_link_certificate,
     verify_companion_link_signature,
     verify_device_list_signature,
     verify_linking_hmac,
@@ -63,7 +65,7 @@ class MessagingClient:
         *,
         client_role: str = "primary",
         encryption_enabled: bool = False,
-        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        request_timeout: float | None = None,
     ):
         """Create a client and initialize its local SQLite history database.
 
@@ -79,7 +81,7 @@ class MessagingClient:
         self.phone_number = phone_number
         self.client_role = client_role
         self.encryption_enabled = encryption_enabled
-        self.request_timeout = request_timeout
+        self.request_timeout = resolve_request_timeout(request_timeout, load_config())
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         fingerprint_path = self.state_dir / "device_identity.json"
@@ -168,6 +170,52 @@ class MessagingClient:
             path += f"/{device_id}"
         payload = self._request(path)
         return deserialize_public_bundle(payload)
+
+    def fetch_devices(self, account_id: str) -> dict:
+        """Fetch and verify public device records before using them for sessions."""
+        roster = self._request(f"/devices/{quote(account_id, safe='')}")
+        devices = roster.get("devices")
+        if not isinstance(devices, list) or not devices:
+            raise ValueError("device roster is empty or invalid")
+        primary_devices = [
+            device
+            for device in devices
+            if device.get("device_id") == roster.get("primary_device_id")
+            and device.get("client_role") == "primary"
+        ]
+        if len(primary_devices) != 1:
+            raise ValueError("device roster must contain exactly one primary")
+        primary_key = decode_bytes(primary_devices[0]["identity_ed25519_public_key"])
+        companion_keys = []
+        for device in devices:
+            if device.get("client_role") != "companion":
+                continue
+            try:
+                certificate = deserialize_companion_link_certificate(
+                    device["link_certificate"]
+                )
+                verify_companion_link_certificate(certificate)
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("device roster contains an invalid companion certificate") from None
+            device_identity_key = decode_bytes(device["identity_ed25519_public_key"])
+            if (
+                certificate.primary_identity_ed25519_public_key != primary_key
+                or certificate.companion_identity_ed25519_public_key != device_identity_key
+            ):
+                raise ValueError("companion certificate does not match its device record")
+            companion_keys.append(device_identity_key)
+        if companion_keys:
+            try:
+                device_list_data = decode_bytes(roster["device_list_data"])
+                device_list_signature = decode_bytes(roster["device_list_signature"])
+                verify_device_list_signature(primary_key, device_list_data, device_list_signature)
+                listed_keys = json.loads(device_list_data)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                raise ValueError("device roster list signature is invalid") from None
+            expected_list = serialize_device_list(companion_keys)
+            if device_list_data != expected_list or not isinstance(listed_keys, list):
+                raise ValueError("signed device list does not match registered companion devices")
+        return roster
 
     def update_device_list(self, companion_identity_ed25519_public_key: bytes) -> dict[str, str]:
         """Persist a companion identity and return the primary-signed device-list payload."""
@@ -333,18 +381,23 @@ class MessagingClient:
         """Process queued messages while encrypted state is locked when enabled."""
         if self.encryption_enabled:
             self._flush_processed_incoming()
-        messages = self._request(f"/messages/{self.phone_number}")
+        message_path = (
+            f"/messages/{quote(self.phone_number, safe='')}/{self.device_id}"
+        )
+        messages = self._request(message_path)
         acknowledged_ids = []
         for index, message in enumerate(messages):
             if self.encryption_enabled:
                 message = self._decrypt_envelope_locked(message)
                 messages[index] = message
             message.pop("client_message_id", None)
+            message.pop("sender_device_id", None)
+            message.pop("recipient_device_id", None)
             self._store_message(message, "received")
             acknowledged_ids.append(message["message_id"])
         if acknowledged_ids:
             self._request(
-                f"/messages/{quote(self.phone_number, safe='')}/ack",
+                f"{message_path}/ack",
                 "POST",
                 {"message_ids": acknowledged_ids},
             )
@@ -363,7 +416,7 @@ class MessagingClient:
         for message in self._crypto.processed_incoming.values():
             self._store_message(message, "received")
         self._request(
-            f"/messages/{quote(self.phone_number, safe='')}/ack",
+            f"/messages/{quote(self.phone_number, safe='')}/{self.device_id}/ack",
             "POST",
             {"message_ids": message_ids},
         )
@@ -378,38 +431,69 @@ class MessagingClient:
             return self._send_encrypted_locked(recipient_id, content)
 
     def _send_encrypted_locked(self, recipient_id: str, content: str):
-        """Encrypt a message using the recipient session's next send key."""
-        session = self._crypto.sessions.get(recipient_id)
-        if session is None:
-            recipient_bundle = self.fetch_pre_key_bundle(recipient_id)
-            state, header = establish_initiator_session(self.identity, recipient_bundle)
-            session = Session(state=state, header=header)
-            self._crypto.sessions[recipient_id] = session
-        message_key, next_chain_key = derive_message_key(session.state.send_chain_key)
-        ciphertext, mac = encrypt_message(message_key, content.encode())
-        envelope = {
-            "version": 1,
-            "header": serialize_session_header(session.header),
-            "ciphertext": encode_bytes(ciphertext),
-            "mac": encode_bytes(mac),
-        }
-        message = {
-            "client_message_id": str(uuid.uuid4()),
+        """Encrypt one copy for every other encrypted participant device."""
+        sender_roster = self.fetch_devices(self.phone_number)
+        recipient_roster = (
+            sender_roster if recipient_id == self.phone_number else self.fetch_devices(recipient_id)
+        )
+        targets = {}
+        for device in sender_roster["devices"]:
+            if device["device_id"] != self.device_id and device["encryption_enabled"]:
+                targets[(self.phone_number, device["device_id"])] = device
+        for device in recipient_roster["devices"]:
+            if device["device_id"] != self.device_id and device["encryption_enabled"]:
+                targets[(recipient_id, device["device_id"])] = device
+        if not targets:
+            raise ValueError("message has no other encrypted participant devices")
+
+        sent_at = datetime.now(UTC).isoformat()
+        delivery_receipts = {}
+        for target_account, target_device_id in targets:
+            session_key = f"{target_account}/{target_device_id}"
+            session = self._crypto.sessions.get(session_key)
+            if session is None:
+                recipient_bundle = self.fetch_pre_key_bundle(
+                    target_account, device_id=target_device_id
+                )
+                state, header = establish_initiator_session(self.identity, recipient_bundle)
+                session = Session(state=state, header=header)
+                self._crypto.sessions[session_key] = session
+            message_key, next_chain_key = derive_message_key(session.state.send_chain_key)
+            ciphertext, mac = encrypt_message(message_key, content.encode())
+            envelope = {
+                "version": 1,
+                "header": serialize_session_header(session.header),
+                "ciphertext": encode_bytes(ciphertext),
+                "mac": encode_bytes(mac),
+            }
+            client_message_id = str(uuid.uuid4())
+            message = {
+                "client_message_id": client_message_id,
+                "sender_id": self.phone_number,
+                "sender_device_id": self.device_id,
+                "recipient_id": target_account,
+                "recipient_device_id": target_device_id,
+                "content": json.dumps(envelope, separators=(",", ":")),
+                "sent_at": sent_at,
+            }
+            response = self._request("/messages", "POST", message, retries=1)
+            session.state.send_chain_key = next_chain_key
+            delivery_receipts[(target_account, target_device_id)] = response["message_id"]
+            self._crypto.save()
+
+        primary_device_id = recipient_roster["primary_device_id"]
+        primary_message_id = delivery_receipts.get((recipient_id, primary_device_id))
+        if primary_message_id is None:
+            primary_message_id = next(iter(delivery_receipts.values()))
+        sent_message = {
+            "message_id": primary_message_id,
             "sender_id": self.phone_number,
             "recipient_id": recipient_id,
-            "content": json.dumps(envelope, separators=(",", ":")),
-            "sent_at": datetime.now(UTC).isoformat(),
+            "content": content,
+            "sent_at": sent_at,
         }
-        response = self._request("/messages", "POST", message, retries=1)
-        # Advance the chain only after the server accepts the message, so a
-        # failed submission can retry with the same still-unused key.
-        session.state.send_chain_key = next_chain_key
-        message.pop("client_message_id")
-        message["message_id"] = response["message_id"]
-        message["content"] = content
-        self._store_message(message, "sent")
-        self._crypto.save()
-        return message
+        self._store_message(sent_message, "sent")
+        return sent_message
 
     def _decrypt_envelope_locked(self, message):
         """Decrypt one envelope and advance its receive chain after verification."""
@@ -421,8 +505,25 @@ class MessagingClient:
             return dict(previously_processed)
         envelope = json.loads(message["content"])
         sender_id = message["sender_id"]
+        sender_device_id = message["sender_device_id"]
+        if message.get("recipient_device_id") != self.device_id:
+            raise ValueError("message is addressed to a different device")
         header = deserialize_session_header(envelope["header"])
-        session_key = (sender_id, session_id_for_header(header))
+        sender_roster = self.fetch_devices(sender_id)
+        sender_device = next(
+            (
+                device
+                for device in sender_roster["devices"]
+                if device["device_id"] == sender_device_id
+            ),
+            None,
+        )
+        if sender_device is None or decode_bytes(
+            sender_device["identity_x25519_public_key"]
+        ) != header.identity_public_key:
+            raise ValueError("message sender identity does not match its registered device")
+        peer_id = f"{sender_id}/{sender_device_id}"
+        session_key = (peer_id, session_id_for_header(header))
         session = self._crypto.incoming_sessions.get(session_key)
         available_pre_keys = None
         try:
