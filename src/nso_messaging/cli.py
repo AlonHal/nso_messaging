@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+from pathlib import Path
 
 from .client import MessagingClient
 from .config import load_config, resolve_request_timeout, resolve_socket_timeout
@@ -41,6 +42,20 @@ def build_parser():
     register = commands.add_parser("register")
     _add_client_options(register)
     register.add_argument("--name")
+    register.add_argument("--link-id")
+    register.add_argument("--link-dir")
+
+    link_offer = commands.add_parser("link-offer")
+    _add_client_options(link_offer)
+    link_offer.set_defaults(client_role="companion", encryption_enabled=True)
+    link_offer.add_argument("--link-id", required=True)
+    link_offer.add_argument("--link-dir")
+
+    link = commands.add_parser("link")
+    _add_client_options(link)
+    link.set_defaults(encryption_enabled=True)
+    link.add_argument("--link-id", required=True)
+    link.add_argument("--link-dir")
 
     send = commands.add_parser("send")
     _add_client_options(send)
@@ -113,7 +128,25 @@ def main(argv=None):
             server.shutdown()
         return
     if args.command == "register":
-        result = _client_from_args(args, config).register(args.name)
+        client = _client_from_args(args, config)
+        if args.client_role == "companion":
+            if not args.link_id:
+                raise SystemExit("registering a companion requires --link-id")
+            directory = None if args.link_dir is None else Path(args.link_dir)
+            result = client.complete_companion_link(args.link_id, directory=directory)
+        else:
+            result = client.register(args.name)
+    elif args.command == "link-offer":
+        directory = None if args.link_dir is None else Path(args.link_dir)
+        result = _client_from_args(args, config).write_link_offer(
+            args.link_id, directory=directory
+        )
+        result = {"offer_path": str(result)}
+    elif args.command == "link":
+        directory = None if args.link_dir is None else Path(args.link_dir)
+        result = _client_from_args(args, config).link_companion(
+            args.link_id, directory=directory
+        )
     elif args.command == "send":
         result = _client_from_args(args, config).send(args.recipient, args.message)
     elif args.command == "receive":

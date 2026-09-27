@@ -21,10 +21,14 @@ from .json_store import write_json_atomic
 from .request_auth import verify_request_signature
 from .session import (
     deserialize_companion_link_certificate,
+    deserialize_linking_data,
     deserialize_public_bundle,
     serialize_companion_link_certificate,
+    serialize_device_list,
     serialize_public_bundle,
     verify_companion_link_certificate,
+    verify_companion_link_signature,
+    verify_device_list_signature,
     verify_signed_pre_key,
 )
 
@@ -141,6 +145,13 @@ class MessagingServer:
                 if parsed.path == "/health":
                     self._send_json(200, {"status": "ok"})
                     return
+                if parsed.path.startswith("/link/"):
+                    parts = parsed.path.removeprefix("/link/").split("/")
+                    if len(parts) != 2:
+                        self._send_error(404, "Not found")
+                        return
+                    self._get_link_data(unquote(parts[0]), unquote(parts[1]))
+                    return
                 if parsed.path.startswith("/bundles/"):
                     parts = parsed.path.removeprefix("/bundles/").split("/")
                     phone_number = unquote(parts[0])
@@ -174,6 +185,13 @@ class MessagingServer:
                         self._send_error(404, "Not found")
                         return
                     self._publish_bundle(phone_number, device_id)
+                    return
+                if parsed.path.startswith("/link/"):
+                    parts = parsed.path.removeprefix("/link/").split("/")
+                    if len(parts) != 2:
+                        self._send_error(404, "Not found")
+                        return
+                    self._publish_link_data(unquote(parts[0]), unquote(parts[1]))
                     return
                 if parsed.path.startswith("/messages/") and parsed.path.endswith("/ack"):
                     recipient_id = unquote(parsed.path.removeprefix("/messages/").removesuffix("/ack"))
@@ -349,6 +367,25 @@ class MessagingServer:
                         ):
                             self._send_error(409, "companion identity is already registered")
                             return
+                        pending = account.get("pending_links", {}).get(device_id)
+                        if pending is None:
+                            self._send_error(403, "no verified primary linking request exists")
+                            return
+                        try:
+                            metadata, pending_primary_key, pending_account_signature = (
+                                deserialize_linking_data(decode_bytes(pending["linking_data"]))
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            self._send_error(400, "pending linking data is invalid")
+                            return
+                        if (
+                            certificate.primary_identity_ed25519_public_key != pending_primary_key
+                            or certificate.metadata != metadata
+                            or certificate.primary_signature != pending_account_signature
+                            or certificate.companion_identity_ed25519_public_key != identity_key
+                        ):
+                            self._send_error(403, "link certificate does not match pending link")
+                            return
                     auth_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
                     device = {
                         "device_id": device_id,
@@ -366,6 +403,8 @@ class MessagingServer:
                     if client_role == "primary":
                         account["auth_key"] = auth_key
                         outer._registrations[phone_number] = account
+                    else:
+                        account["pending_links"].pop(device_id, None)
                     outer._save_registrations()
                 logger.info("account registered; total accounts=%d", len(outer._registrations))
                 self._send_json(201, {
@@ -376,6 +415,125 @@ class MessagingServer:
                     "device_id": device_id,
                     "auth_key": auth_key,
                 })
+
+            def _publish_link_data(self, phone_number, companion_device_id):
+                """Store a verified primary device list and pending link response."""
+                payload = self._read_json(require_auth=True)
+                if payload is None:
+                    return
+                if self._authenticated_account() != phone_number:
+                    self._send_error(403, "authenticated account does not match link owner")
+                    return
+                try:
+                    validate_device_id(companion_device_id, phone_number)
+                    device_list_data = decode_bytes(payload["device_list_data"])
+                    list_signature = decode_bytes(payload["list_signature"])
+                    linking_data = decode_bytes(payload["linking_data"])
+                    linking_hmac = decode_bytes(payload["linking_hmac"])
+                    metadata, primary_identity_key, account_signature = deserialize_linking_data(
+                        linking_data
+                    )
+                    listed_keys = json.loads(device_list_data)
+                    if (
+                        not isinstance(listed_keys, list)
+                        or any(not isinstance(key, str) for key in listed_keys)
+                        or len(listed_keys) != len(set(listed_keys))
+                    ):
+                        raise ValueError("device list is invalid")
+                    decoded_listed_keys = [decode_bytes(key) for key in listed_keys]
+                    if any(len(key) != 32 for key in decoded_listed_keys):
+                        raise ValueError("device list contains an invalid identity key")
+                    if serialize_device_list(decoded_listed_keys) != device_list_data:
+                        raise ValueError("device list is not canonical")
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    self._send_error(400, "linking payload is invalid")
+                    return
+                with outer._lock:
+                    account = outer._registrations.get(phone_number)
+                    if account is None:
+                        self._send_error(404, "primary account is not registered")
+                        return
+                    primary_device_id = account.get("primary_device_id")
+                    primary_device = account.get("devices", {}).get(primary_device_id, {})
+                    if (
+                        self._authenticated_device_id != primary_device_id
+                        or primary_device.get("client_role") != "primary"
+                    ):
+                        self._send_error(403, "only the primary device can link companions")
+                        return
+                    encoded_primary_key = primary_device.get("identity_ed25519_public_key")
+                    if encoded_primary_key is None:
+                        self._send_error(400, "primary identity key is unavailable")
+                        return
+                    if primary_identity_key != decode_bytes(encoded_primary_key):
+                        self._send_error(400, "L_data does not identify the registered primary")
+                        return
+                    try:
+                        verify_device_list_signature(primary_identity_key, device_list_data, list_signature)
+                    except (StopIteration, ValueError):
+                        self._send_error(400, "device list signature is invalid")
+                        return
+                    companion_identity_key = None
+                    for candidate_key in decoded_listed_keys:
+                        try:
+                            verify_companion_link_signature(
+                                primary_identity_key,
+                                candidate_key,
+                                metadata,
+                                account_signature,
+                            )
+                        except ValueError:
+                            continue
+                        companion_identity_key = candidate_key
+                        break
+                    if companion_identity_key is None:
+                        self._send_error(400, "account signature does not match the device list")
+                        return
+                    companion_key_encoded = encode_bytes(companion_identity_key)
+                    companion_device = account.get("devices", {}).get(companion_device_id)
+                    if companion_device is not None:
+                        self._send_error(409, "device_id is already registered")
+                        return
+                    known_companion_keys = {
+                        record.get("identity_ed25519_public_key")
+                        for record in account.get("devices", {}).values()
+                        if record.get("client_role") == "companion"
+                    }
+                    expected_keys = known_companion_keys | {companion_key_encoded}
+                    if set(listed_keys) != expected_keys:
+                        self._send_error(400, "device list does not match linked companion identities")
+                        return
+                    pending_links = account.setdefault("pending_links", {})
+                    pending = {
+                        "device_list_data": encode_bytes(device_list_data),
+                        "list_signature": encode_bytes(list_signature),
+                        "linking_data": encode_bytes(linking_data),
+                        "linking_hmac": encode_bytes(linking_hmac),
+                    }
+                    existing = pending_links.get(companion_device_id)
+                    if existing is not None and existing != pending:
+                        self._send_error(409, "a different link is already pending for this device")
+                        return
+                    account["device_list_data"] = pending["device_list_data"]
+                    account["device_list_signature"] = pending["list_signature"]
+                    pending_links[companion_device_id] = pending
+                    outer._save_registrations()
+                self._send_json(202, {"device_id": companion_device_id, "status": "pending"})
+
+            def _get_link_data(self, phone_number, companion_device_id):
+                """Forward the primary's linking data; the companion verifies its PHMAC."""
+                with outer._lock:
+                    account = outer._registrations.get(phone_number)
+                    pending = (
+                        None
+                        if account is None
+                        else account.get("pending_links", {}).get(companion_device_id)
+                    )
+                    if pending is None:
+                        self._send_error(404, "no pending link exists for this device")
+                        return
+                    response = dict(pending)
+                self._send_json(200, response)
 
             def _publish_bundle(self, phone_number, device_id=None):
                 """Store only a validated public pre-key bundle for an account."""

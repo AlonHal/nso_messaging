@@ -26,6 +26,55 @@ def test_cli_register_send_receive_and_history(running_server, tmp_path, capsys)
     assert history[0]["direction"] == "received"
 
 
+def test_cli_links_companion_through_offer_primary_and_registration_steps(
+    running_server, tmp_path, capsys
+):
+    """Run file-offer creation, primary approval, and companion completion via CLI."""
+    server = running_server.base_url
+    link_directory = tmp_path / "link-files"
+    primary_state = tmp_path / "primary"
+    companion_state = tmp_path / "companion"
+    phone_number = "+15550026"
+    link_id = "cli-pairing-26"
+
+    main(
+        [
+            "register", "--server", server, "--phone", phone_number,
+            "--state-dir", str(primary_state), "--encryption-enabled",
+        ]
+    )
+    capsys.readouterr()
+    main(
+        [
+            "link-offer", "--server", server, "--phone", phone_number,
+            "--state-dir", str(companion_state), "--link-id", link_id,
+            "--link-dir", str(link_directory),
+        ]
+    )
+    capsys.readouterr()
+    main(
+        [
+            "link", "--server", server, "--phone", phone_number,
+            "--state-dir", str(primary_state), "--link-id", link_id,
+            "--link-dir", str(link_directory),
+        ]
+    )
+    linked = json.loads(capsys.readouterr().out)
+    assert linked["status"] == "pending"
+
+    main(
+        [
+            "register", "--server", server, "--phone", phone_number,
+            "--state-dir", str(companion_state), "--client-role", "companion",
+            "--encryption-enabled", "--link-id", link_id,
+            "--link-dir", str(link_directory),
+        ]
+    )
+    registration = json.loads(capsys.readouterr().out)
+    assert registration["client_role"] == "companion"
+    assert registration["device_id"]
+
+
 def test_cli_config_option_must_precede_subcommand(running_server, tmp_path, capsys):
     """Verify the global config option is accepted before a command."""
     config_path = tmp_path / "config.json"

@@ -4,14 +4,13 @@ import pytest
 
 from nso_messaging.client import MessagingClient
 from nso_messaging.crypto import AuthenticationError
-from nso_messaging.encoding import decode_bytes
+from nso_messaging.encoding import decode_bytes, encode_bytes
 from nso_messaging.session import (
     CompanionLinkCertificate,
     IdentityKeyPair,
     PreKeyBundle,
     serialize_device_list,
     sign_companion_acknowledgement,
-    sign_companion_link,
     verify_device_list_signature,
 )
 
@@ -68,20 +67,10 @@ def test_primary_and_verified_companion_have_separate_server_device_records(
         client_role="companion",
         encryption_enabled=True,
     )
-    metadata = b"test-link-metadata"
-    certificate = CompanionLinkCertificate(
-        primary_identity_ed25519_public_key=primary.identity.ed25519_public_bytes,
-        companion_identity_ed25519_public_key=companion.identity.ed25519_public_bytes,
-        metadata=metadata,
-        primary_signature=sign_companion_link(
-            primary.identity, companion.identity.ed25519_public_bytes, metadata
-        ),
-        companion_signature=sign_companion_acknowledgement(
-            companion.identity, primary.identity.ed25519_public_bytes, metadata
-        ),
-    )
-
-    registration = companion.register(link_certificate=certificate)
+    link_id = "verified-device-record-link"
+    companion.write_link_offer(link_id, directory=tmp_path)
+    primary.link_companion(link_id, directory=tmp_path)
+    registration = companion.complete_companion_link(link_id, directory=tmp_path)
     account_devices = running_server._registrations[primary.phone_number]["devices"]
 
     assert registration["device_id"] == companion.device_id
@@ -90,6 +79,110 @@ def test_primary_and_verified_companion_have_separate_server_device_records(
     assert companion.fetch_pre_key_bundle().identity_ed25519_public_key == (
         companion.identity.ed25519_public_bytes
     )
+
+
+def test_primary_server_companion_linking_exchange(running_server, tmp_path):
+    """Complete QR-file linking through server forwarding and verified registration."""
+    phone_number = "+15550018"
+    primary = MessagingClient(
+        running_server.base_url, phone_number, tmp_path / "primary", encryption_enabled=True
+    )
+    companion = MessagingClient(
+        running_server.base_url,
+        phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    primary.register()
+    link_id = "pairing-test-18"
+
+    companion.write_link_offer(link_id, directory=tmp_path)
+    primary.link_companion(link_id, directory=tmp_path)
+    registration = companion.complete_companion_link(link_id, directory=tmp_path)
+
+    account = running_server._registrations[phone_number]
+    device_list_data = decode_bytes(account["device_list_data"])
+    list_signature = decode_bytes(account["device_list_signature"])
+    assert verify_device_list_signature(
+        primary.identity.ed25519_public_bytes, device_list_data, list_signature
+    )
+    assert registration["device_id"] == companion.device_id
+    assert account["devices"][companion.device_id]["client_role"] == "companion"
+    assert companion._crypto.primary_identity_ed25519_public_key == (
+        primary.identity.ed25519_public_bytes
+    )
+    assert companion._crypto.link_metadata
+    assert companion.fetch_pre_key_bundle().identity_ed25519_public_key == (
+        companion.identity.ed25519_public_bytes
+    )
+    restarted_companion = MessagingClient(
+        running_server.base_url,
+        phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    assert restarted_companion._crypto.primary_identity_ed25519_public_key == (
+        primary.identity.ed25519_public_bytes
+    )
+    assert restarted_companion._crypto.link_metadata == companion._crypto.link_metadata
+
+
+def test_companion_rejects_server_forwarded_link_with_tampered_hmac(running_server, tmp_path):
+    """Reject a server response that fails PHMAC before companion registration."""
+    phone_number = "+15550022"
+    primary = MessagingClient(
+        running_server.base_url, phone_number, tmp_path / "primary", encryption_enabled=True
+    )
+    companion = MessagingClient(
+        running_server.base_url,
+        phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    primary.register()
+    link_id = "bad-phmac-22"
+    companion.write_link_offer(link_id, directory=tmp_path)
+    primary.link_companion(link_id, directory=tmp_path)
+    running_server._registrations[phone_number]["pending_links"][companion.device_id][
+        "linking_hmac"
+    ] = encode_bytes(bytes(32))
+
+    with pytest.raises(ValueError, match="linking HMAC"):
+        companion.complete_companion_link(link_id, directory=tmp_path)
+
+    assert companion.device_id not in running_server._registrations[phone_number]["devices"]
+
+
+def test_primary_does_not_persist_device_list_when_link_upload_fails(
+    running_server, tmp_path, monkeypatch
+):
+    """Keep local signed device state unchanged when the server rejects a link upload."""
+    phone_number = "+15550023"
+    primary = MessagingClient(
+        running_server.base_url, phone_number, tmp_path / "primary", encryption_enabled=True
+    )
+    companion = MessagingClient(
+        running_server.base_url,
+        phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    primary.register()
+    link_id = "failed-link-23"
+    companion.write_link_offer(link_id, directory=tmp_path)
+
+    def reject_link(path, method="GET", payload=None, *, retries=0):
+        raise RuntimeError("simulated link upload rejection")
+
+    monkeypatch.setattr(primary, "_request", reject_link)
+    with pytest.raises(RuntimeError, match="simulated link upload rejection"):
+        primary.link_companion(link_id, directory=tmp_path)
+
+    assert primary._crypto.companion_identity_ed25519_public_keys == []
 
 
 def test_server_rejects_companion_with_a_tampered_link_signature(running_server, tmp_path):

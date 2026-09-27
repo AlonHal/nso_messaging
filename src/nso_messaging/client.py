@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .client_state import ClientCryptoState
+from .companion_link import read_companion_offer, write_companion_offer
 from .config import DEFAULT_REQUEST_TIMEOUT
 from .crypto import decrypt_message, derive_message_key, encrypt_message
 from .device_identity import format_fingerprint, load_or_create_device_fingerprint
@@ -23,16 +24,26 @@ from .session import (
     PreKeyBundle,
     PublicPreKeyBundle,
     Session,
+    compute_linking_hmac,
+    deserialize_linking_data,
     deserialize_public_bundle,
     deserialize_session_header,
     establish_initiator_session,
     establish_responder_session,
+    generate_linking_metadata,
+    generate_linking_secret,
     serialize_companion_link_certificate,
     serialize_device_list,
+    serialize_linking_data,
     serialize_public_bundle,
     serialize_session_header,
     session_id_for_header,
+    sign_companion_acknowledgement,
+    sign_companion_link,
     sign_device_list,
+    verify_companion_link_signature,
+    verify_device_list_signature,
+    verify_linking_hmac,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,6 +189,111 @@ class MessagingClient:
             "device_list_data": encode_bytes(device_list_data),
             "list_signature": encode_bytes(list_signature),
         }
+
+    def write_link_offer(self, link_id: str, *, directory: Path | None = None) -> Path:
+        """Write this companion's device identity and L_companion for the primary."""
+        if self.client_role != "companion" or self._crypto is None:
+            raise RuntimeError("only an encrypted companion can create a link offer")
+        linking_secret = generate_linking_secret()
+        offer_options = {} if directory is None else {"directory": directory}
+        return write_companion_offer(
+            link_id,
+            self.device_id,
+            self.identity.ed25519_public_bytes,
+            linking_secret,
+            **offer_options,
+        )
+
+    def link_companion(self, link_id: str, *, directory: Path | None = None):
+        """Sign and upload linking data for the companion offer to the server."""
+        if self.client_role != "primary" or self._crypto is None:
+            raise RuntimeError("only an encrypted primary can approve a companion link")
+        if self.auth_key is None:
+            raise RuntimeError("primary must be registered before linking a companion")
+        offer_options = {} if directory is None else {"directory": directory}
+        offer = read_companion_offer(link_id, **offer_options)
+        metadata = generate_linking_metadata()
+        account_signature = sign_companion_link(
+            self.identity, offer.companion_identity_ed25519_public_key, metadata
+        )
+        linking_data = serialize_linking_data(metadata, self.identity.ed25519_public_bytes, account_signature)
+        with self._crypto.lock():
+            self._crypto.restore()
+            companion_keys = list(self._crypto.companion_identity_ed25519_public_keys)
+            if offer.companion_identity_ed25519_public_key not in companion_keys:
+                companion_keys.append(offer.companion_identity_ed25519_public_key)
+            device_list_data = serialize_device_list(companion_keys)
+            list_signature = sign_device_list(self.identity, device_list_data)
+            payload = {
+                "device_list_data": encode_bytes(device_list_data),
+                "list_signature": encode_bytes(list_signature),
+                "linking_data": encode_bytes(linking_data),
+                "linking_hmac": encode_bytes(
+                    compute_linking_hmac(offer.linking_secret, linking_data)
+                ),
+            }
+            path = (
+                f"/link/{quote(self.phone_number, safe='')}/"
+                f"{quote(offer.device_id, safe='')}"
+            )
+            response = self._request(path, "POST", payload, retries=1)
+            self._crypto.companion_identity_ed25519_public_keys = companion_keys
+            self._crypto.save()
+            return response
+
+    def complete_companion_link(self, link_id: str, *, directory: Path | None = None):
+        """Verify the server-forwarded response, persist the primary, and register."""
+        if self.client_role != "companion" or self._crypto is None:
+            raise RuntimeError("only an encrypted companion can complete a link")
+        if self.auth_key is not None:
+            raise RuntimeError("companion is already registered")
+        offer_options = {} if directory is None else {"directory": directory}
+        offer = read_companion_offer(link_id, **offer_options)
+        if (
+            offer.device_id != self.device_id
+            or offer.companion_identity_ed25519_public_key != self.identity.ed25519_public_bytes
+        ):
+            raise ValueError("link offer does not identify this companion device")
+        path = (
+            f"/link/{quote(self.phone_number, safe='')}/"
+            f"{quote(self.device_id, safe='')}"
+        )
+        response = self._request(path)
+        linking_data = decode_bytes(response["linking_data"])
+        linking_hmac = decode_bytes(response["linking_hmac"])
+        verify_linking_hmac(offer.linking_secret, linking_data, linking_hmac)
+        metadata, primary_identity_key, account_signature = deserialize_linking_data(
+            linking_data
+        )
+        verify_companion_link_signature(
+            primary_identity_key,
+            offer.companion_identity_ed25519_public_key,
+            metadata,
+            account_signature,
+        )
+        device_list_data = decode_bytes(response["device_list_data"])
+        list_signature = decode_bytes(response["list_signature"])
+        verify_device_list_signature(primary_identity_key, device_list_data, list_signature)
+        listed_keys = json.loads(device_list_data)
+        if not isinstance(listed_keys, list) or encode_bytes(
+            offer.companion_identity_ed25519_public_key
+        ) not in listed_keys:
+            raise ValueError("signed device list does not include this companion")
+        with self._crypto.lock():
+            self._crypto.restore()
+            self._crypto.primary_identity_ed25519_public_key = primary_identity_key
+            self._crypto.link_metadata = metadata
+            self._crypto.save()
+        certificate = CompanionLinkCertificate(
+            primary_identity_ed25519_public_key=primary_identity_key,
+            companion_identity_ed25519_public_key=offer.companion_identity_ed25519_public_key,
+            metadata=metadata,
+            primary_signature=account_signature,
+            companion_signature=sign_companion_acknowledgement(
+                self.identity, primary_identity_key, metadata
+            ),
+        )
+        return self.register(link_certificate=certificate)
 
     def send(self, recipient_id: str, content: str):
         """Send one message and store the sent copy locally.
