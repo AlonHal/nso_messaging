@@ -10,6 +10,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+from .encoding import decode_bytes, encode_bytes
 from .json_store import write_json_atomic
 from .session import (
     PreKeyBundle,
@@ -38,6 +39,7 @@ class ClientCryptoState:
         self.sessions: dict[str, Session] = {}
         self.incoming_sessions: dict[tuple[str, str], Session] = {}
         self.processed_incoming: dict[str, dict] = {}
+        self.companion_identity_ed25519_public_keys: list[bytes] = []
 
     @property
     def identity(self):
@@ -67,6 +69,10 @@ class ClientCryptoState:
             for entry in data.get("incoming_sessions", [])
         }
         self.processed_incoming = data.get("processed_incoming", {})
+        self.companion_identity_ed25519_public_keys = [
+            decode_bytes(encoded_key)
+            for encoded_key in data.get("companion_identity_ed25519_public_keys", [])
+        ]
 
     def save(self) -> None:
         """Persist the current state atomically and restrict its permissions."""
@@ -83,6 +89,10 @@ class ClientCryptoState:
                 for (peer_id, session_id), session in self.incoming_sessions.items()
             ],
             "processed_incoming": self.processed_incoming,
+            "companion_identity_ed25519_public_keys": [
+                encode_bytes(key)
+                for key in self.companion_identity_ed25519_public_keys
+            ],
         }
         write_json_atomic(self.path, data)
         self.path.chmod(0o600)

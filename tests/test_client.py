@@ -4,7 +4,16 @@ import pytest
 
 from nso_messaging.client import MessagingClient
 from nso_messaging.crypto import AuthenticationError
-from nso_messaging.session import PreKeyBundle
+from nso_messaging.encoding import decode_bytes
+from nso_messaging.session import (
+    CompanionLinkCertificate,
+    IdentityKeyPair,
+    PreKeyBundle,
+    serialize_device_list,
+    sign_companion_acknowledgement,
+    sign_companion_link,
+    verify_device_list_signature,
+)
 
 
 def test_clients_register_exchange_and_store_local_history(running_server, tmp_path):
@@ -24,6 +33,98 @@ def test_clients_register_exchange_and_store_local_history(running_server, tmp_p
     assert bob.history() == [received[0] | {"direction": "received"}]
 
 
+def test_client_registers_a_stable_device_identity(running_server, tmp_path):
+    """Verify registration binds a persistent local device ID to its server record."""
+    state_dir = tmp_path / "stable-device"
+    client = MessagingClient(
+        running_server.base_url, "+15550014", state_dir, encryption_enabled=True
+    )
+
+    registration = client.register()
+    device_id = client.device_id
+
+    assert registration["device_id"] == device_id
+    assert running_server._registrations[client.phone_number]["devices"][device_id][
+        "client_role"
+    ] == "primary"
+    restarted = MessagingClient(
+        running_server.base_url, client.phone_number, state_dir, encryption_enabled=True
+    )
+    assert restarted.device_id == device_id
+
+
+def test_primary_and_verified_companion_have_separate_server_device_records(
+    running_server, tmp_path
+):
+    """Verify a companion joins the account only with a valid two-party certificate."""
+    primary = MessagingClient(
+        running_server.base_url, "+15550017", tmp_path / "primary", encryption_enabled=True
+    )
+    primary.register()
+    companion = MessagingClient(
+        running_server.base_url,
+        primary.phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    metadata = b"test-link-metadata"
+    certificate = CompanionLinkCertificate(
+        primary_identity_ed25519_public_key=primary.identity.ed25519_public_bytes,
+        companion_identity_ed25519_public_key=companion.identity.ed25519_public_bytes,
+        metadata=metadata,
+        primary_signature=sign_companion_link(
+            primary.identity, companion.identity.ed25519_public_bytes, metadata
+        ),
+        companion_signature=sign_companion_acknowledgement(
+            companion.identity, primary.identity.ed25519_public_bytes, metadata
+        ),
+    )
+
+    registration = companion.register(link_certificate=certificate)
+    account_devices = running_server._registrations[primary.phone_number]["devices"]
+
+    assert registration["device_id"] == companion.device_id
+    assert set(account_devices) == {primary.device_id, companion.device_id}
+    assert account_devices[companion.device_id]["client_role"] == "companion"
+    assert companion.fetch_pre_key_bundle().identity_ed25519_public_key == (
+        companion.identity.ed25519_public_bytes
+    )
+
+
+def test_server_rejects_companion_with_a_tampered_link_signature(running_server, tmp_path):
+    """Reject invalid companion proofs without adding a server device record."""
+    primary = MessagingClient(
+        running_server.base_url, "+15550020", tmp_path / "primary", encryption_enabled=True
+    )
+    primary.register()
+    companion = MessagingClient(
+        running_server.base_url,
+        primary.phone_number,
+        tmp_path / "companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    metadata = b"tampered-link-metadata"
+    certificate = CompanionLinkCertificate(
+        primary_identity_ed25519_public_key=primary.identity.ed25519_public_bytes,
+        companion_identity_ed25519_public_key=companion.identity.ed25519_public_bytes,
+        metadata=metadata,
+        primary_signature=bytes(64),
+        companion_signature=sign_companion_acknowledgement(
+            companion.identity, primary.identity.ed25519_public_bytes, metadata
+        ),
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        companion.register(link_certificate=certificate)
+
+    assert error.value.code == 400
+    assert set(running_server._registrations[primary.phone_number]["devices"]) == {
+        primary.device_id
+    }
+
+
 def test_client_publishes_and_fetches_public_pre_key_bundle(running_server, tmp_path):
     """Verify client publication exposes only public bundle material."""
     client = MessagingClient(running_server.base_url, "+15550015", tmp_path / "client")
@@ -37,6 +138,27 @@ def test_client_publishes_and_fetches_public_pre_key_bundle(running_server, tmp_
     assert fetched.identity_x25519_public_key == private_bundle.identity.x25519_public_bytes
     assert len(fetched.one_time_pre_keys) == 1
     assert private_bundle.one_time_pre_keys
+
+
+def test_primary_updates_and_persists_signed_companion_device_list(tmp_path):
+    """Verify a linked companion is added to the durable, primary-signed device list."""
+    state_dir = tmp_path / "primary"
+    client = MessagingClient("http://localhost", "+15550016", state_dir, encryption_enabled=True)
+    companion = IdentityKeyPair.generate()
+
+    payload = client.update_device_list(companion.ed25519_public_bytes)
+    device_list_data = decode_bytes(payload["device_list_data"])
+    list_signature = decode_bytes(payload["list_signature"])
+
+    assert device_list_data == serialize_device_list([companion.ed25519_public_bytes])
+    assert verify_device_list_signature(
+        client.identity.ed25519_public_bytes, device_list_data, list_signature
+    )
+
+    restarted = MessagingClient(
+        "http://localhost", "+15550016", state_dir, encryption_enabled=True
+    )
+    assert restarted.update_device_list(companion.ed25519_public_bytes) == payload
 
 
 def test_encrypted_clients_exchange_plaintext_only_in_local_history(running_server, tmp_path):

@@ -24,11 +24,21 @@ def test_registration_persists_account_configuration(running_server):
         "name": "Alice",
         "client_role": "primary",
         "encryption_enabled": False,
+        "device_id": response["device_id"],
         "auth_key": None,
     }
     assert isinstance(response["auth_key"], str)
-    assert json.loads((running_server.data_dir / "registrations.json").read_text()) == {
-        "+15550001": response
+    stored_account = json.loads(
+        (running_server.data_dir / "registrations.json").read_text()
+    )["+15550001"]
+    assert stored_account["phone_number"] == response["phone_number"]
+    assert stored_account["name"] == response["name"]
+    assert stored_account["primary_device_id"] == response["device_id"]
+    assert stored_account["devices"][response["device_id"]] == {
+        "device_id": response["device_id"],
+        "client_role": "primary",
+        "encryption_enabled": False,
+        "auth_key": response["auth_key"],
     }
 
 
@@ -56,6 +66,7 @@ def test_non_object_registration_body_is_rejected(running_server, body):
     "payload",
     [
         {"phone_number": "+15550005", "client_role": "companion"},
+        {"phone_number": "+15550006", "client_role": "tablet"},
         {"phone_number": "+15550007", "encryption_enabled": "false"},
     ],
 )

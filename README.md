@@ -1,8 +1,8 @@
 # nso_messaging
 
-A small Python server-client foundation for the take-home encrypted messaging assignment. The current implementation provides a primary client, an HTTP relay server, local client chat history, and a CLI.
+A small Python server-client foundation for the take-home encrypted messaging assignment. The current implementation provides device identities, primary and certificate-linked companion registration, an HTTP relay server, local client chat history, and a CLI.
 
-The client supports authenticated HTTP requests and optional encrypted message envelopes. Companion clients and DH ratcheting are not implemented.
+The client supports authenticated HTTP requests and optional encrypted message envelopes. Device-scoped key records are supported; multi-device message fan-out and DH ratcheting are not implemented yet.
 
 ## Requirements
 
@@ -202,11 +202,13 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 - The server stores account configuration but does not persist chat history.
 - Public pre-key bundles and one-time-key consumption are persisted in `pre_key_bundles.json` under the server data directory.
 - Message delivery uses a transient in-memory queue and polling.
-- Registration issues per-account HMAC credentials; protected polling, bundle access, and message submission require signed requests.
-- Encrypted identity, pre-key, and session state are persisted below a SHA-256 phone-number fingerprint directory in the client's state directory.
-- The current client role is `primary`.
+- Registration issues per-device HMAC credentials. The server stores devices under their account, and each device has a stable 16-byte fingerprint-derived ID persisted in `device_identity.json`.
+- Encrypted identity, pre-key, and session state are persisted as readable JSON/Base64 files in the client's state directory; this is a proof of concept, not encrypted-at-rest key storage.
+- Companion registration requires a primary-signed and companion-signed link certificate. The server checks both signatures and verifies that the certificate keys match the registered primary and companion identities.
+- Bundle records are keyed by account and device ID, with one-time pre-keys consumed independently per device.
+- The CLI currently exposes primary registration and one-shot send/receive. Companion link-file orchestration and background polling are not wired into CLI commands.
+- Message queues and message envelopes are still addressed at the account level. Client-side per-device sessions, sender/receiver device fan-out, and companion sender proofs remain upcoming work.
 - Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
-- The `--client-role` option is retained for configuration compatibility, but only `primary` is supported.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.
 
 See [docs/plans/server-client-foundation.md](docs/plans/server-client-foundation.md) for the staged implementation plan for this feature.
