@@ -21,6 +21,7 @@ def test_phone_digits_to_bytes_strips_non_digits_and_pads_short_numbers():
 
 
 def test_generate_device_fingerprint_matches_documented_example_shape():
+    """Verify the fingerprint's phone-derived prefix and separator byte."""
     fingerprint = generate_device_fingerprint("9725023332222")
 
     assert len(fingerprint) == FINGERPRINT_SIZE
@@ -31,6 +32,7 @@ def test_generate_device_fingerprint_matches_documented_example_shape():
 
 
 def test_generate_device_fingerprint_is_unique_per_call():
+    """Verify two fingerprints for the same phone number never collide."""
     first = generate_device_fingerprint("9725023332222")
     second = generate_device_fingerprint("9725023332222")
 
@@ -39,6 +41,7 @@ def test_generate_device_fingerprint_is_unique_per_call():
 
 
 def test_format_and_parse_fingerprint_round_trip():
+    """Verify formatting and parsing a fingerprint is lossless."""
     fingerprint = generate_device_fingerprint("9725023332222")
 
     formatted = format_fingerprint(fingerprint)
@@ -48,6 +51,7 @@ def test_format_and_parse_fingerprint_round_trip():
 
 
 def test_load_or_create_device_fingerprint_persists_and_reuses(tmp_path):
+    """Verify a persisted fingerprint is reused rather than regenerated."""
     path = tmp_path / "device.json"
 
     first = load_or_create_device_fingerprint(path, "9725023332222")
@@ -59,6 +63,7 @@ def test_load_or_create_device_fingerprint_persists_and_reuses(tmp_path):
 
 
 def test_load_or_create_device_fingerprint_differs_across_separate_files(tmp_path):
+    """Verify separate fingerprint files never derive the same fingerprint."""
     primary_fingerprint = load_or_create_device_fingerprint(
         tmp_path / "primary.json", "9725023332222"
     )
