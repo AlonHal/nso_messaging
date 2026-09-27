@@ -289,6 +289,26 @@ def sign_companion_link(
     )
 
 
+def verify_companion_link_signature(
+    primary_identity_ed25519_public_key: bytes,
+    companion_identity_ed25519_public_key: bytes,
+    metadata: bytes,
+    primary_signature: bytes,
+) -> bool:
+    """Verify A_signature independently before the companion countersigns."""
+    try:
+        verifier = ed25519.Ed25519PublicKey.from_public_bytes(
+            primary_identity_ed25519_public_key
+        )
+        verifier.verify(
+            primary_signature,
+            _COMPANION_LINK_PREFIX + metadata + companion_identity_ed25519_public_key,
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        raise ValueError("companion account signature is invalid") from None
+    return True
+
+
 def sign_companion_acknowledgement(
     companion_identity: IdentityKeyPair,
     primary_identity_ed25519_public_key: bytes,
@@ -306,14 +326,11 @@ def sign_companion_acknowledgement(
 def verify_companion_link_certificate(certificate: CompanionLinkCertificate) -> bool:
     """Verify both the primary's and companion's signatures over a link certificate."""
     try:
-        primary_verifier = ed25519.Ed25519PublicKey.from_public_bytes(
-            certificate.primary_identity_ed25519_public_key
-        )
-        primary_verifier.verify(
+        verify_companion_link_signature(
+            certificate.primary_identity_ed25519_public_key,
+            certificate.companion_identity_ed25519_public_key,
+            certificate.metadata,
             certificate.primary_signature,
-            _COMPANION_LINK_PREFIX
-            + certificate.metadata
-            + certificate.companion_identity_ed25519_public_key,
         )
         companion_verifier = ed25519.Ed25519PublicKey.from_public_bytes(
             certificate.companion_identity_ed25519_public_key
@@ -395,6 +412,9 @@ def serialize_linking_data(
 
 def deserialize_linking_data(linking_data: bytes) -> tuple[bytes, bytes, bytes]:
     """Split L_data back into ``(metadata, I_primary, A_signature)``."""
+    expected_size = LINK_METADATA_SIZE + _ED25519_PUBLIC_KEY_SIZE + _ED25519_SIGNATURE_SIZE
+    if len(linking_data) != expected_size:
+        raise ValueError("L_data has an invalid length")
     primary_key_start = LINK_METADATA_SIZE
     signature_start = primary_key_start + _ED25519_PUBLIC_KEY_SIZE
     return (

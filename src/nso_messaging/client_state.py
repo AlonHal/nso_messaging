@@ -40,6 +40,8 @@ class ClientCryptoState:
         self.incoming_sessions: dict[tuple[str, str], Session] = {}
         self.processed_incoming: dict[str, dict] = {}
         self.companion_identity_ed25519_public_keys: list[bytes] = []
+        self.primary_identity_ed25519_public_key: bytes | None = None
+        self.link_metadata: bytes | None = None
 
     @property
     def identity(self):
@@ -73,6 +75,12 @@ class ClientCryptoState:
             decode_bytes(encoded_key)
             for encoded_key in data.get("companion_identity_ed25519_public_keys", [])
         ]
+        encoded_primary_key = data.get("primary_identity_ed25519_public_key")
+        self.primary_identity_ed25519_public_key = (
+            None if encoded_primary_key is None else decode_bytes(encoded_primary_key)
+        )
+        encoded_metadata = data.get("link_metadata")
+        self.link_metadata = None if encoded_metadata is None else decode_bytes(encoded_metadata)
 
     def save(self) -> None:
         """Persist the current state atomically and restrict its permissions."""
@@ -93,6 +101,12 @@ class ClientCryptoState:
                 encode_bytes(key)
                 for key in self.companion_identity_ed25519_public_keys
             ],
+            "primary_identity_ed25519_public_key": (
+                None
+                if self.primary_identity_ed25519_public_key is None
+                else encode_bytes(self.primary_identity_ed25519_public_key)
+            ),
+            "link_metadata": None if self.link_metadata is None else encode_bytes(self.link_metadata),
         }
         write_json_atomic(self.path, data)
         self.path.chmod(0o600)

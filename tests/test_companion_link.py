@@ -1,50 +1,28 @@
 from nso_messaging.companion_link import (
     read_companion_offer,
-    read_primary_link_response,
     write_companion_offer,
-    write_primary_link_response,
 )
-from nso_messaging.session import (
-    CompanionLinkCertificate,
-    IdentityKeyPair,
-    sign_companion_acknowledgement,
-    sign_companion_link,
-    verify_companion_link_certificate,
-)
+from nso_messaging.session import IdentityKeyPair, generate_linking_secret
 
 
-def test_full_file_based_link_exchange_produces_a_verified_certificate(tmp_path):
-    """Verify the /tmp-file exchange (QR-code stand-in) yields a valid certificate."""
-    primary = IdentityKeyPair.generate()
+def test_companion_file_offer_round_trips_linking_material(tmp_path):
+    """Verify the shared-file offer carries the device ID, identity, and L_companion."""
     companion = IdentityKeyPair.generate()
     link_id = "test-link-1"
-    metadata = b"nso-companion-link"
 
-    write_companion_offer(link_id, companion.ed25519_public_bytes, directory=tmp_path)
-    offered_companion_key = read_companion_offer(link_id, directory=tmp_path)
-
-    primary_signature = sign_companion_link(primary, offered_companion_key, metadata)
-    write_primary_link_response(
+    linking_secret = generate_linking_secret()
+    device_id = "companion-device-1"
+    write_companion_offer(
         link_id,
-        primary.ed25519_public_bytes,
-        metadata,
-        primary_signature,
+        device_id,
+        companion.ed25519_public_bytes,
+        linking_secret,
         directory=tmp_path,
     )
-    primary_key, read_metadata, read_primary_signature = read_primary_link_response(
-        link_id, directory=tmp_path
-    )
-    companion_signature = sign_companion_acknowledgement(companion, primary_key, read_metadata)
-
-    certificate = CompanionLinkCertificate(
-        primary_identity_ed25519_public_key=primary_key,
-        companion_identity_ed25519_public_key=offered_companion_key,
-        metadata=read_metadata,
-        primary_signature=read_primary_signature,
-        companion_signature=companion_signature,
-    )
-
-    assert verify_companion_link_certificate(certificate)
+    offer = read_companion_offer(link_id, directory=tmp_path)
+    assert offer.device_id == device_id
+    assert offer.companion_identity_ed25519_public_key == companion.ed25519_public_bytes
+    assert offer.linking_secret == linking_secret
 
 
 def test_default_link_directory_is_tmp():

@@ -67,6 +67,34 @@ Each client needs its own local state directory. The phone number is the account
 
 Registration stores the account configuration on the server. The client creates a local SQLite history database in its state directory.
 
+### Link a Companion Device
+
+The POC replaces the QR code with an offer JSON file shared between the companion and primary processes. Use the same `--link-dir` and `--link-id` for each command:
+
+```bash
+.venv/bin/python -m nso_messaging link-offer \
+  --server http://127.0.0.1:8000 \
+  --phone +15550001 \
+  --state-dir client-data/alice-companion \
+  --link-id alice-companion
+
+.venv/bin/python -m nso_messaging link \
+  --server http://127.0.0.1:8000 \
+  --phone +15550001 \
+  --state-dir client-data/alice \
+  --link-id alice-companion
+
+.venv/bin/python -m nso_messaging register \
+  --server http://127.0.0.1:8000 \
+  --phone +15550001 \
+  --state-dir client-data/alice-companion \
+  --client-role companion \
+  --encryption-enabled \
+  --link-id alice-companion
+```
+
+The offer contains the companion device ID, identity public key, and `L_companion` as readable JSON/Base64. The primary uploads the signed device list, `L_data`, and `PHMAC`; the companion verifies the forwarded proof before uploading its signed pre-key bundle.
+
 ### Send a Message
 
 ```bash
@@ -206,7 +234,7 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 - Encrypted identity, pre-key, and session state are persisted as readable JSON/Base64 files in the client's state directory; this is a proof of concept, not encrypted-at-rest key storage.
 - Companion registration requires a primary-signed and companion-signed link certificate. The server checks both signatures and verifies that the certificate keys match the registered primary and companion identities.
 - Bundle records are keyed by account and device ID, with one-time pre-keys consumed independently per device.
-- The CLI currently exposes primary registration and one-shot send/receive. Companion link-file orchestration and background polling are not wired into CLI commands.
+- The CLI supports offer creation, primary link approval, and companion registration; background polling is not implemented.
 - Message queues and message envelopes are still addressed at the account level. Client-side per-device sessions, sender/receiver device fan-out, and companion sender proofs remain upcoming work.
 - Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.
