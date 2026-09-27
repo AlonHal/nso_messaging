@@ -50,6 +50,8 @@ def test_cli_resolves_configured_timeout_and_explicit_override(tmp_path, monkeyp
     captured = []
 
     class RecordingClient:
+        """Stand in for MessagingClient and capture the timeout it was constructed with."""
+
         def __init__(self, *args, **kwargs):
             captured.append(kwargs)
 

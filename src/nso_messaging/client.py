@@ -222,6 +222,8 @@ class MessagingClient:
             "sent_at": datetime.now(UTC).isoformat(),
         }
         response = self._request("/messages", "POST", message, retries=1)
+        # Advance the chain only after the server accepts the message, so a
+        # failed submission can retry with the same still-unused key.
         session.state.send_chain_key = next_chain_key
         message.pop("client_message_id")
         message["message_id"] = response["message_id"]
@@ -233,6 +235,8 @@ class MessagingClient:
     def _decrypt_envelope_locked(self, message):
         """Decrypt one envelope and advance its receive chain after verification."""
         delivery_id = message["message_id"]
+        # A redelivered message (e.g. after a lost ACK) returns the cached
+        # plaintext instead of decrypting again with an already-advanced key.
         previously_processed = self._crypto.processed_incoming.get(delivery_id)
         if previously_processed is not None:
             return dict(previously_processed)
@@ -259,9 +263,13 @@ class MessagingClient:
                 decode_bytes(envelope["mac"]),
             )
         except (ValueError, KeyError, TypeError):
+            # Restore any one-time pre-key consumed for a new session that
+            # ultimately failed authentication, so it remains available.
             if available_pre_keys is not None:
                 self.pre_key_bundle.one_time_pre_keys = available_pre_keys
             raise
+        # Advance the chain only after decryption succeeds, so a rejected
+        # envelope leaves the receive chain untouched for a future retry.
         session.state.receive_chain_key = next_chain_key
         if new_session:
             self._crypto.incoming_sessions[session_key] = session
@@ -269,6 +277,8 @@ class MessagingClient:
         decrypted["content"] = plaintext.decode()
         decrypted.pop("client_message_id", None)
         self._crypto.processed_incoming[delivery_id] = decrypted
+        # Persist before returning so a lost ACK can be retried without
+        # re-deriving the message key from an already-advanced chain.
         self._crypto.save()
         return decrypted
 
