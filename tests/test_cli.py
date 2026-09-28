@@ -26,6 +26,34 @@ def test_cli_register_send_receive_and_history(running_server, tmp_path, capsys)
     assert history[0]["direction"] == "received"
 
 
+def test_cli_listen_emits_received_messages_as_json_lines(tmp_path, monkeypatch, capsys):
+    """Expose the long-running client polling mode through the CLI."""
+    observed = {}
+    message = {"message_id": "message-1", "content": "hello"}
+
+    class ListeningClient:
+        """Stub a client listener that yields one delivered message."""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def listen(self, poll_interval):
+            observed["poll_interval"] = poll_interval
+            yield message
+
+    monkeypatch.setattr("nso_messaging.cli.MessagingClient", ListeningClient)
+
+    main(
+        [
+            "listen", "--server", "http://localhost:8000", "--phone", "+15550024",
+            "--state-dir", str(tmp_path / "listener"), "--poll-interval", "0.25",
+        ]
+    )
+
+    assert observed["poll_interval"] == 0.25
+    assert json.loads(capsys.readouterr().out) == message
+
+
 def test_cli_links_companion_through_offer_primary_and_registration_steps(
     running_server, tmp_path, capsys
 ):

@@ -2,7 +2,9 @@
 
 import json
 import logging
+import math
 import sqlite3
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -376,6 +378,20 @@ class MessagingClient:
                 self._crypto.restore()
                 return self._receive_locked()
         return self._receive_locked()
+
+    def listen(
+        self,
+        poll_interval: float = 1.0,
+        *,
+        stop_event: threading.Event | None = None,
+    ):
+        """Poll and yield received messages until interrupted or the event is set."""
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be a positive finite number")
+        stop_event = stop_event or threading.Event()
+        while not stop_event.is_set():
+            yield from self.receive()
+            stop_event.wait(poll_interval)
 
     def _receive_locked(self):
         """Process queued messages while encrypted state is locked when enabled."""

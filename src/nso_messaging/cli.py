@@ -65,6 +65,10 @@ def build_parser():
     receive = commands.add_parser("receive")
     _add_client_options(receive)
 
+    listen = commands.add_parser("listen")
+    _add_client_options(listen)
+    listen.add_argument("--poll-interval", type=float, default=1.0)
+
     history = commands.add_parser("history")
     history.add_argument("--state-dir", required=True)
     return parser
@@ -151,6 +155,14 @@ def main(argv=None):
         result = _client_from_args(args, config).send(args.recipient, args.message)
     elif args.command == "receive":
         result = _client_from_args(args, config).receive()
+    elif args.command == "listen":
+        client = _client_from_args(args, config)
+        try:
+            for message in client.listen(args.poll_interval):
+                print(json.dumps(message), flush=True)
+        except KeyboardInterrupt:
+            pass
+        return
     else:
         # History does not need a server connection, but it reuses the client's
         # query implementation so CLI and library results stay identical.

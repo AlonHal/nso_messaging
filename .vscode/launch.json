@@ -91,6 +91,25 @@
             "justMyCode": true
         },
         {
+            "name": "Client: listen (Alice)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "nso_messaging",
+            "args": [
+                "listen",
+                "--server", "http://127.0.0.1:8000",
+                "--phone", "+10000000000",
+                "--state-dir", "client-data/alice",
+                "--poll-interval", "1",
+                "--encryption-enabled"
+            ],
+            "env": {
+                "NSO_MESSAGING_CONFIG": "${workspaceFolder}/.vscode/debug-timeouts.json"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
             "name": "Client: history",
             "type": "debugpy",
             "request": "launch",
