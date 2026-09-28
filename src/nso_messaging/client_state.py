@@ -38,6 +38,7 @@ class ClientCryptoState:
         self.pre_key_bundle: PreKeyBundle | None = None
         self.sessions: dict[str, Session] = {}
         self.incoming_sessions: dict[tuple[str, str], Session] = {}
+        self.active_sessions: dict[str, str] = {}
         self.processed_incoming: dict[str, dict] = {}
         self.companion_identity_ed25519_public_keys: list[bytes] = []
         self.primary_identity_ed25519_public_key: bytes | None = None
@@ -70,6 +71,7 @@ class ClientCryptoState:
             (entry["peer_id"], entry["session_id"]): deserialize_session(entry)
             for entry in data.get("incoming_sessions", [])
         }
+        self.active_sessions = data.get("active_sessions", {})
         self.processed_incoming = data.get("processed_incoming", {})
         self.companion_identity_ed25519_public_keys = [
             decode_bytes(encoded_key)
@@ -96,6 +98,7 @@ class ClientCryptoState:
                 {"peer_id": peer_id, "session_id": session_id, **serialize_session(session)}
                 for (peer_id, session_id), session in self.incoming_sessions.items()
             ],
+            "active_sessions": self.active_sessions,
             "processed_incoming": self.processed_incoming,
             "companion_identity_ed25519_public_keys": [
                 encode_bytes(key)

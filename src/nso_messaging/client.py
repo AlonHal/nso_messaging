@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -35,6 +36,9 @@ from .session import (
     establish_responder_session,
     generate_linking_metadata,
     generate_linking_secret,
+    generate_ratchet_key_pair,
+    ratchet_public_key_bytes,
+    ratchet_with_peer,
     serialize_companion_link_certificate,
     serialize_device_list,
     serialize_linking_data,
@@ -461,24 +465,96 @@ class MessagingClient:
                 targets[(recipient_id, device["device_id"])] = device
         if not targets:
             raise ValueError("message has no other encrypted participant devices")
+        sender_device = next(
+            device for device in sender_roster["devices"]
+            if device["device_id"] == self.device_id
+        )
+        sender_link_certificate = None
+        if self.client_role == "companion":
+            try:
+                sender_link_certificate = deserialize_companion_link_certificate(
+                    sender_device["link_certificate"]
+                )
+                verify_companion_link_certificate(sender_link_certificate)
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("companion sender has no valid link certificate") from None
 
         sent_at = datetime.now(UTC).isoformat()
         delivery_receipts = {}
-        for target_account, target_device_id in targets:
+        for (target_account, target_device_id), target_device in targets.items():
             session_key = f"{target_account}/{target_device_id}"
+            active_session_id = self._crypto.active_sessions.get(session_key)
             session = self._crypto.sessions.get(session_key)
+            if (
+                session is not None
+                and active_session_id is not None
+                and session_id_for_header(session.header) != active_session_id
+            ):
+                session = None
+            if session is None:
+                if active_session_id is not None:
+                    session = self._crypto.incoming_sessions.get(
+                        (session_key, active_session_id)
+                    )
+                if session is None and active_session_id is None:
+                    session = self._crypto.sessions.get(session_key)
+                if session is None and active_session_id is None:
+                    incoming = [
+                        incoming_session
+                        for (incoming_peer_id, _), incoming_session
+                        in self._crypto.incoming_sessions.items()
+                        if incoming_peer_id == session_key
+                    ]
+                    if incoming:
+                        session = incoming[-1]
+            try:
+                expected_identity_x25519 = decode_bytes(
+                    target_device["identity_x25519_public_key"]
+                )
+                expected_identity_ed25519 = decode_bytes(
+                    target_device["identity_ed25519_public_key"]
+                )
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("encrypted device roster has invalid identity keys") from None
+            if len(expected_identity_x25519) != 32 or len(expected_identity_ed25519) != 32:
+                raise ValueError("encrypted device roster has invalid identity keys")
             if session is None:
                 recipient_bundle = self.fetch_pre_key_bundle(
                     target_account, device_id=target_device_id
                 )
-                state, header = establish_initiator_session(self.identity, recipient_bundle)
+                if (
+                    recipient_bundle.identity_x25519_public_key != expected_identity_x25519
+                    or recipient_bundle.identity_ed25519_public_key != expected_identity_ed25519
+                ):
+                    raise ValueError("bundle identity does not match registered device")
+                state, header = establish_initiator_session(
+                    self.identity,
+                    recipient_bundle,
+                    sender_link_certificate,
+                )
                 session = Session(state=state, header=header)
                 self._crypto.sessions[session_key] = session
-            message_key, next_chain_key = derive_message_key(session.state.send_chain_key)
+            state = session.state
+            ratchet_private_key = state.ratchet_private_key
+            root_key = state.root_key
+            send_chain_key = state.send_chain_key
+            if state.should_ratchet_send:
+                ratchet_private_key = generate_ratchet_key_pair()
+                send_chain_key, root_key = ratchet_with_peer(
+                    state.root_key,
+                    ratchet_private_key,
+                    state.remote_ratchet_public_key,
+                )
+            message_key, next_chain_key = derive_message_key(send_chain_key)
             ciphertext, mac = encrypt_message(message_key, content.encode())
+            message_header = replace(
+                session.header,
+                ratchet_public_key=ratchet_public_key_bytes(ratchet_private_key),
+                companion_link_certificate=sender_link_certificate,
+            )
             envelope = {
                 "version": 1,
-                "header": serialize_session_header(session.header),
+                "header": serialize_session_header(message_header),
                 "ciphertext": encode_bytes(ciphertext),
                 "mac": encode_bytes(mac),
             }
@@ -493,8 +569,12 @@ class MessagingClient:
                 "sent_at": sent_at,
             }
             response = self._request("/messages", "POST", message, retries=1)
-            session.state.send_chain_key = next_chain_key
+            state.root_key = root_key
+            state.send_chain_key = next_chain_key
+            state.ratchet_private_key = ratchet_private_key
+            state.should_ratchet_send = True
             delivery_receipts[(target_account, target_device_id)] = response["message_id"]
+            self._crypto.active_sessions[session_key] = session_id_for_header(session.header)
             self._crypto.save()
 
         primary_device_id = recipient_roster["primary_device_id"]
@@ -534,17 +614,40 @@ class MessagingClient:
             ),
             None,
         )
-        if sender_device is None or decode_bytes(
-            sender_device["identity_x25519_public_key"]
-        ) != header.identity_public_key:
-            raise ValueError("message sender identity does not match its registered device")
+        if sender_device is None:
+            raise ValueError("message sender device is not in the verified roster")
+        header_certificate = header.companion_link_certificate
+        if sender_device["client_role"] == "companion":
+            if header_certificate is None:
+                raise ValueError("companion session setup is missing its link certificate")
+            try:
+                verify_companion_link_certificate(header_certificate)
+            except ValueError:
+                raise ValueError("companion session setup has an invalid link certificate") from None
+            if serialize_companion_link_certificate(header_certificate) != sender_device.get(
+                "link_certificate"
+            ):
+                raise ValueError("companion session certificate does not match its roster record")
+        elif header_certificate is not None:
+            raise ValueError("primary session setup must not contain a companion certificate")
         peer_id = f"{sender_id}/{sender_device_id}"
         session_key = (peer_id, session_id_for_header(header))
         session = self._crypto.incoming_sessions.get(session_key)
+        if session is None:
+            outgoing_session = self._crypto.sessions.get(peer_id)
+            if (
+                outgoing_session is not None
+                and session_id_for_header(outgoing_session.header) == session_key[1]
+            ):
+                session = outgoing_session
         available_pre_keys = None
         try:
             new_session = session is None
             if new_session:
+                if decode_bytes(sender_device["identity_x25519_public_key"]) != (
+                    header.identity_public_key
+                ):
+                    raise ValueError("new session identity does not match its sender device")
                 available_pre_keys = dict(self.pre_key_bundle.one_time_pre_keys)
                 state = establish_responder_session(
                     self.pre_key_bundle,
@@ -552,7 +655,20 @@ class MessagingClient:
                     header,
                 )
                 session = Session(state=state, header=header)
-            message_key, next_chain_key = derive_message_key(session.state.receive_chain_key)
+            state = session.state
+            remote_ratchet_public_key = (
+                header.ratchet_public_key or header.ephemeral_public_key
+            )
+            ratchet_changed = remote_ratchet_public_key != state.remote_ratchet_public_key
+            root_key = state.root_key
+            receive_chain_key = state.receive_chain_key
+            if ratchet_changed:
+                receive_chain_key, root_key = ratchet_with_peer(
+                    state.root_key,
+                    state.ratchet_private_key,
+                    remote_ratchet_public_key,
+                )
+            message_key, next_chain_key = derive_message_key(receive_chain_key)
             plaintext = decrypt_message(
                 message_key,
                 decode_bytes(envelope["ciphertext"]),
@@ -566,9 +682,14 @@ class MessagingClient:
             raise
         # Advance the chain only after decryption succeeds, so a rejected
         # envelope leaves the receive chain untouched for a future retry.
-        session.state.receive_chain_key = next_chain_key
+        state.receive_chain_key = next_chain_key
+        if ratchet_changed:
+            state.root_key = root_key
+            state.remote_ratchet_public_key = remote_ratchet_public_key
+            state.should_ratchet_send = True
         if new_session:
             self._crypto.incoming_sessions[session_key] = session
+        self._crypto.active_sessions[peer_id] = session_key[1]
         decrypted = dict(message)
         decrypted["content"] = plaintext.decode()
         decrypted.pop("client_message_id", None)

@@ -2,7 +2,7 @@
 
 A small Python server-client foundation for the take-home encrypted messaging assignment. The current implementation provides device identities, primary and certificate-linked companion registration, an HTTP relay server, local client chat history, and a CLI.
 
-The client supports authenticated HTTP requests and optional encrypted message envelopes. Device-scoped key records and encrypted multi-device fan-out are supported; DH ratcheting is not implemented.
+The client supports authenticated HTTP requests and encrypted message envelopes. Device-scoped identities, companion registration, encrypted multi-device fan-out, and a per-session DH ratchet are implemented.
 
 ## Requirements
 
@@ -250,6 +250,7 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 - Companion registration requires a primary-signed and companion-signed link certificate. The server checks both signatures and verifies that the certificate keys match the registered primary and companion identities.
 - Bundle records are keyed by account and device ID, with one-time pre-keys consumed independently per device.
 - Encrypted sends validate sender/recipient device rosters and create one pairwise encrypted envelope for each encrypted device on both accounts, excluding only the sending device. Each device has an independent session and delivery queue.
+- Companion-originated session headers carry the companion link certificate, and receivers verify it against the authenticated device roster. Each encrypted message advertises a fresh DH ratchet ephemeral; new peer ephemerals advance the root and directional chain keys.
 - The CLI supports offer creation, primary link approval, companion registration, and long-running per-device polling with `listen`.
 - Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.

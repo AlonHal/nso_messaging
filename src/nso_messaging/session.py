@@ -163,6 +163,8 @@ class SessionHeader:
     identity_public_key: bytes
     ephemeral_public_key: bytes
     one_time_pre_key_id: str | None
+    companion_link_certificate: CompanionLinkCertificate | None = None
+    ratchet_public_key: bytes | None = None
 
 
 @dataclass
@@ -173,6 +175,9 @@ class SessionState:
     send_chain_key: bytes
     receive_chain_key: bytes
     identity_public_key: bytes
+    ratchet_private_key: x25519.X25519PrivateKey
+    remote_ratchet_public_key: bytes
+    should_ratchet_send: bool
 
 
 @dataclass
@@ -186,13 +191,23 @@ class Session:
     header: SessionHeader
 
 
-def serialize_session_header(header: SessionHeader) -> dict[str, str | None]:
+def serialize_session_header(header: SessionHeader) -> dict:
     """Encode handshake public-key fields for envelope or local-state JSON."""
-    return {
+    serialized = {
         "identity_public_key": encode_bytes(header.identity_public_key),
         "ephemeral_public_key": encode_bytes(header.ephemeral_public_key),
         "one_time_pre_key_id": header.one_time_pre_key_id,
     }
+    if header.companion_link_certificate is not None:
+        serialized["companion_link_certificate"] = serialize_companion_link_certificate(
+            header.companion_link_certificate
+        )
+    serialized["ratchet_public_key"] = encode_bytes(
+        header.ephemeral_public_key
+        if header.ratchet_public_key is None
+        else header.ratchet_public_key
+    )
+    return serialized
 
 
 def deserialize_session_header(data: dict) -> SessionHeader:
@@ -201,6 +216,16 @@ def deserialize_session_header(data: dict) -> SessionHeader:
         identity_public_key=decode_bytes(data["identity_public_key"]),
         ephemeral_public_key=decode_bytes(data["ephemeral_public_key"]),
         one_time_pre_key_id=data.get("one_time_pre_key_id"),
+        companion_link_certificate=(
+            None
+            if data.get("companion_link_certificate") is None
+            else deserialize_companion_link_certificate(data["companion_link_certificate"])
+        ),
+        ratchet_public_key=(
+            decode_bytes(data["ratchet_public_key"])
+            if data.get("ratchet_public_key") is not None
+            else decode_bytes(data["ephemeral_public_key"])
+        ),
     )
 
 
@@ -209,13 +234,16 @@ def session_id_for_header(header: SessionHeader) -> str:
     return encode_bytes(header.ephemeral_public_key)
 
 
-def serialize_session_state(state: SessionState) -> dict[str, str]:
+def serialize_session_state(state: SessionState) -> dict:
     """Encode root and directional chain keys for local persistence."""
     return {
         "root_key": encode_bytes(state.root_key),
         "send_chain_key": encode_bytes(state.send_chain_key),
         "receive_chain_key": encode_bytes(state.receive_chain_key),
         "identity_public_key": encode_bytes(state.identity_public_key),
+        "ratchet_private_key": encode_bytes(_raw_private_bytes(state.ratchet_private_key)),
+        "remote_ratchet_public_key": encode_bytes(state.remote_ratchet_public_key),
+        "should_ratchet_send": state.should_ratchet_send,
     }
 
 
@@ -226,6 +254,11 @@ def deserialize_session_state(data: dict) -> SessionState:
         send_chain_key=decode_bytes(data["send_chain_key"]),
         receive_chain_key=decode_bytes(data["receive_chain_key"]),
         identity_public_key=decode_bytes(data["identity_public_key"]),
+        ratchet_private_key=x25519.X25519PrivateKey.from_private_bytes(
+            decode_bytes(data["ratchet_private_key"])
+        ),
+        remote_ratchet_public_key=decode_bytes(data["remote_ratchet_public_key"]),
+        should_ratchet_send=data["should_ratchet_send"],
     )
 
 
@@ -466,6 +499,7 @@ def verify_device_list_signature(
 def establish_initiator_session(
     identity: IdentityKeyPair,
     recipient_bundle: PublicPreKeyBundle,
+    companion_link_certificate: CompanionLinkCertificate | None = None,
 ) -> tuple[SessionState, SessionHeader]:
     """Derive initiator state and the header needed by the recipient."""
     verify_signed_pre_key(recipient_bundle)
@@ -500,11 +534,21 @@ def establish_initiator_session(
     # on which physical chain is "send" vs. "receive".
     send_chain, receive_chain = _directional_chains(root_key, chain_key, initiator=True)
     return (
-        SessionState(root_key, send_chain, receive_chain, identity.x25519_public_bytes),
+        SessionState(
+            root_key,
+            send_chain,
+            receive_chain,
+            identity.x25519_public_bytes,
+            ephemeral_private_key,
+            _raw_public_bytes(recipient_signed_pre_key),
+            False,
+        ),
         SessionHeader(
             identity.x25519_public_bytes,
             _raw_public_bytes(ephemeral_private_key.public_key()),
             None if one_time_entry is None else one_time_entry["key_id"],
+            companion_link_certificate,
+            _raw_public_bytes(ephemeral_private_key.public_key()),
         ),
     )
 
@@ -541,6 +585,9 @@ def establish_responder_session(
         send_chain,
         receive_chain,
         recipient_bundle.identity.x25519_public_bytes,
+        recipient_bundle.signed_pre_key,
+        header.ratchet_public_key or header.ephemeral_public_key,
+        True,
     )
 
 
@@ -554,6 +601,40 @@ def _directional_chains(root_key: bytes, chain_key: bytes, *, initiator: bool) -
     ).derive(chain_key)
     first, second = derived[:32], derived[32:]
     return (first, second) if initiator else (second, first)
+
+
+def derive_ratchet_keys(root_key: bytes, ephemeral_secret: bytes) -> tuple[bytes, bytes]:
+    """Derive the next directional chain key and root key from one DH ratchet step."""
+    derived = HKDF(
+        algorithm=hashes.SHA256(),
+        length=64,
+        salt=root_key,
+        info=b"nso DH ratchet",
+    ).derive(ephemeral_secret)
+    return derived[:32], derived[32:]
+
+
+def ratchet_with_peer(
+    root_key: bytes,
+    local_private_key: x25519.X25519PrivateKey,
+    remote_public_key: bytes,
+) -> tuple[bytes, bytes]:
+    """Perform ECDH with the current peer ratchet key and derive next keys."""
+    try:
+        remote_key = x25519.X25519PublicKey.from_public_bytes(remote_public_key)
+    except (ValueError, TypeError):
+        raise ValueError("peer ratchet public key is invalid") from None
+    return derive_ratchet_keys(root_key, local_private_key.exchange(remote_key))
+
+
+def generate_ratchet_key_pair() -> x25519.X25519PrivateKey:
+    """Generate a fresh X25519 key pair for a DH-ratchet turn."""
+    return x25519.X25519PrivateKey.generate()
+
+
+def ratchet_public_key_bytes(private_key: x25519.X25519PrivateKey) -> bytes:
+    """Return the raw public half of a ratchet key pair."""
+    return _raw_public_bytes(private_key.public_key())
 
 
 def _raw_public_bytes(key) -> bytes:
