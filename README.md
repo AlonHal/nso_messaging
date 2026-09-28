@@ -119,6 +119,21 @@ The server assigns a message ID and queues the envelope for the recipient.
 
 Receiving polls the server and removes the delivered envelopes from the server's transient queue. The received messages are stored in Bob's local SQLite history.
 
+### Listen for Messages
+
+Keep a registered client online and polling for incoming messages with:
+
+```bash
+.venv/bin/python -m nso_messaging listen \
+  --server http://127.0.0.1:8000 \
+  --phone +15550001 \
+  --state-dir client-data/alice \
+  --encryption-enabled \
+  --poll-interval 1
+```
+
+For a companion, use its state directory and add `--client-role companion`. The command prints each received message as a JSON line, stores it locally, and continues until interrupted with Ctrl-C. Run one listener process for each device that should receive messages.
+
 ### View Local History
 
 History does not require a running server:

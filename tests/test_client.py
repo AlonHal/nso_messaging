@@ -1,4 +1,5 @@
 import json
+import threading
 import urllib.error
 
 import pytest
@@ -151,6 +152,36 @@ def test_direct_client_uses_global_configured_request_timeout(tmp_path, monkeypa
 
     assert client.request_timeout is None
     assert explicit_timeout_client.request_timeout == 12
+
+
+def test_client_listen_yields_messages_until_stopped(tmp_path, monkeypatch):
+    """Poll through receive and yield messages until a stop event is set."""
+    client = MessagingClient("http://localhost", "+15550025", tmp_path / "listener")
+    stop_event = threading.Event()
+    message = {"message_id": "message-1", "content": "hello"}
+    calls = 0
+
+    def receive():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [message]
+        stop_event.set()
+        return []
+
+    monkeypatch.setattr(client, "receive", receive)
+
+    assert list(client.listen(poll_interval=0.001, stop_event=stop_event)) == [message]
+    assert calls == 2
+
+
+@pytest.mark.parametrize("poll_interval", [0, -1, float("inf"), float("nan")])
+def test_client_listen_rejects_invalid_poll_intervals(tmp_path, poll_interval):
+    """Avoid a busy loop or invalid wait duration in the long-running listener."""
+    client = MessagingClient("http://localhost", "+15550025", tmp_path / "listener")
+
+    with pytest.raises(ValueError, match="poll_interval"):
+        list(client.listen(poll_interval=poll_interval))
 
 
 def test_primary_and_verified_companion_have_separate_server_device_records(
