@@ -250,7 +250,7 @@ plaintext = decrypt_message(message_key, ciphertext, mac)
 - Companion registration requires a primary-signed and companion-signed link certificate. The server checks both signatures and verifies that the certificate keys match the registered primary and companion identities.
 - Bundle records are keyed by account and device ID, with one-time pre-keys consumed independently per device.
 - Encrypted sends validate sender/recipient device rosters and create one pairwise encrypted envelope for each encrypted device on both accounts, excluding only the sending device. Each device has an independent session and delivery queue.
-- The CLI supports offer creation, primary link approval, and companion registration; background polling is not implemented.
+- The CLI supports offer creation, primary link approval, companion registration, and long-running per-device polling with `listen`.
 - Plaintext remains the default; pass `--encryption-enabled` to register and use an encrypted client.
 - Phone-number verification, group messaging, media attachments, durable server message storage, and non-CLI interfaces are out of scope for this stage.
 
