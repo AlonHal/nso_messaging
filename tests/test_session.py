@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import x25519
 
 from nso_messaging.session import (
     LINK_METADATA_SIZE,
@@ -9,6 +10,7 @@ from nso_messaging.session import (
     IdentityKeyPair,
     PreKeyBundle,
     compute_linking_hmac,
+    derive_ratchet_keys,
     deserialize_companion_link_certificate,
     deserialize_linking_data,
     deserialize_public_bundle,
@@ -53,6 +55,22 @@ def test_session_setup_derives_matching_directional_chains():
     assert initiator_state.send_chain_key == responder_state.receive_chain_key
     assert initiator_state.receive_chain_key == responder_state.send_chain_key
     assert initiator_state.root_key == responder_state.root_key
+
+
+def test_dh_ratchet_derives_matching_root_and_chain_keys():
+    """Derive the same next root and chain keys from both sides of the ECDH ratchet."""
+    sender_ephemeral = x25519.X25519PrivateKey.generate()
+    recipient_ephemeral = x25519.X25519PrivateKey.generate()
+    root_key = bytes(range(32))
+    sender_secret = sender_ephemeral.exchange(recipient_ephemeral.public_key())
+    recipient_secret = recipient_ephemeral.exchange(sender_ephemeral.public_key())
+
+    sender_chain, sender_root = derive_ratchet_keys(root_key, sender_secret)
+    recipient_chain, recipient_root = derive_ratchet_keys(root_key, recipient_secret)
+
+    assert sender_chain == recipient_chain
+    assert sender_root == recipient_root
+    assert sender_root != root_key
 
 
 def test_invalid_signed_pre_key_is_rejected():

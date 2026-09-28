@@ -12,6 +12,7 @@ from nso_messaging.session import (
     IdentityKeyPair,
     PreKeyBundle,
     serialize_device_list,
+    serialize_public_bundle,
     sign_companion_acknowledgement,
     verify_device_list_signature,
 )
@@ -79,6 +80,12 @@ def test_encrypted_send_fans_out_to_each_other_participant_device(running_server
     assert alice.receive() == []
 
     reply = bob_companion.send(alice.phone_number, "reply from companion")
+    companion_copy = running_server._messages[(alice.phone_number, alice.device_id)][0]
+    companion_header = json.loads(companion_copy["content"])["header"]
+    assert companion_header["companion_link_certificate"] == running_server._registrations[
+        bob.phone_number
+    ]["devices"][bob_companion.device_id]["link_certificate"]
+
     alice_messages = alice.receive()
     alice_companion_messages = alice_companion.receive()
     bob_messages = bob.receive()
@@ -114,6 +121,105 @@ def test_client_lists_account_devices_and_validates_companion_proof(running_serv
         device for device in roster["devices"] if device["device_id"] == companion.device_id
     )
     assert companion_record["client_role"] == "companion"
+
+
+def test_encrypted_send_rejects_bundle_identity_not_in_verified_roster(running_server, tmp_path):
+    """Do not establish a session with a bundle identity that contradicts its device roster."""
+    sender = MessagingClient(
+        running_server.base_url, "+15550063", tmp_path / "sender", encryption_enabled=True
+    )
+    recipient = MessagingClient(
+        running_server.base_url, "+15550064", tmp_path / "recipient", encryption_enabled=True
+    )
+    sender.register()
+    recipient.register()
+    substituted_bundle = PreKeyBundle.generate().public_bundle()
+    running_server._bundles[recipient.phone_number][recipient.device_id] = serialize_public_bundle(
+        substituted_bundle
+    )
+
+    with pytest.raises(ValueError, match="bundle identity does not match registered device"):
+        sender.send(recipient.phone_number, "must not go to a substituted identity")
+
+    assert running_server._messages == {}
+
+
+def test_receiver_rejects_tampered_companion_session_certificate(running_server, tmp_path):
+    """Reject companion session setup if its carried link proof is tampered."""
+    sender_primary = MessagingClient(
+        running_server.base_url, "+15550065", tmp_path / "sender-primary", encryption_enabled=True
+    )
+    sender_companion = MessagingClient(
+        running_server.base_url,
+        sender_primary.phone_number,
+        tmp_path / "sender-companion",
+        client_role="companion",
+        encryption_enabled=True,
+    )
+    recipient = MessagingClient(
+        running_server.base_url, "+15550066", tmp_path / "recipient", encryption_enabled=True
+    )
+    sender_primary.register()
+    recipient.register()
+    _link_companion(sender_primary, sender_companion, "sender-proof-test", tmp_path)
+    sender_companion.send(recipient.phone_number, "tamper companion proof")
+
+    recipient_queue = (recipient.phone_number, recipient.device_id)
+    queued_message = running_server._messages[recipient_queue][0]
+    envelope = json.loads(queued_message["content"])
+    certificate = envelope["header"]["companion_link_certificate"]
+    certificate["companion_signature"] = encode_bytes(bytes(64))
+    queued_message["content"] = json.dumps(envelope)
+
+    with pytest.raises(ValueError, match="invalid link certificate"):
+        recipient.receive()
+
+    assert recipient.history() == []
+
+
+def test_dh_ratchet_rotates_ephemeral_on_conversation_turn(running_server, tmp_path):
+    """Reuse the pairwise session and advertise a fresh ephemeral on reply."""
+    alice = MessagingClient(
+        running_server.base_url, "+15550067", tmp_path / "alice", encryption_enabled=True
+    )
+    bob = MessagingClient(
+        running_server.base_url, "+15550068", tmp_path / "bob", encryption_enabled=True
+    )
+    alice.register()
+    bob.register()
+
+    alice.send(bob.phone_number, "first turn")
+    bob_queue = (bob.phone_number, bob.device_id)
+    first_header = json.loads(running_server._messages[bob_queue][0]["content"])["header"]
+    alice.send(bob.phone_number, "same sending turn")
+    same_turn_header = json.loads(running_server._messages[bob_queue][1]["content"])["header"]
+    assert same_turn_header["ratchet_public_key"] != first_header["ratchet_public_key"]
+    assert [message["content"] for message in bob.receive()] == [
+        "first turn",
+        "same sending turn",
+    ]
+    bob.send(alice.phone_number, "reply turn")
+
+    alice_queue = (alice.phone_number, alice.device_id)
+    reply_header = json.loads(running_server._messages[alice_queue][0]["content"])["header"]
+
+    assert reply_header["ephemeral_public_key"] == first_header["ephemeral_public_key"]
+    assert reply_header["ratchet_public_key"] != same_turn_header["ratchet_public_key"]
+    assert alice.receive()[0]["content"] == "reply turn"
+
+    alice_session = alice._crypto.sessions[f"{bob.phone_number}/{bob.device_id}"]
+    bob_session = bob._crypto.incoming_sessions[
+        (f"{alice.phone_number}/{alice.device_id}", first_header["ephemeral_public_key"])
+    ]
+    assert alice_session.state.root_key == bob_session.state.root_key
+    assert alice_session.state.send_chain_key == bob_session.state.receive_chain_key
+    assert alice_session.state.receive_chain_key == bob_session.state.send_chain_key
+
+    alice.send(bob.phone_number, "second turn")
+    second_copy = running_server._messages[bob_queue][0]
+    second_header = json.loads(second_copy["content"])["header"]
+    assert second_header["ratchet_public_key"] != reply_header["ratchet_public_key"]
+    assert bob.receive()[0]["content"] == "second turn"
 
 
 def test_client_registers_a_stable_device_identity(running_server, tmp_path):
@@ -517,6 +623,8 @@ def test_encrypted_state_survives_new_client_instances(running_server, tmp_path)
     bob.register()
     alice.send("+15550027", "before restart")
     assert bob.receive()[0]["content"] == "before restart"
+    bob.send("+15550026", "ratchet state before restart")
+    assert alice.receive()[0]["content"] == "ratchet state before restart"
 
     restarted_alice = MessagingClient(
         running_server.base_url, "+15550026", alice_dir, encryption_enabled=True
@@ -525,10 +633,10 @@ def test_encrypted_state_survives_new_client_instances(running_server, tmp_path)
         running_server.base_url, "+15550027", bob_dir, encryption_enabled=True
     )
 
-    sent = restarted_alice.send("+15550027", "survives restart")
+    sent = restarted_alice.send("+15550027", "survives ratchet restart")
     received = restarted_bob.receive()
 
-    assert received[0]["content"] == sent["content"] == "survives restart"
+    assert received[0]["content"] == sent["content"] == "survives ratchet restart"
 
 
 def test_encrypted_clients_can_cross_initiate_before_polling(running_server, tmp_path):
@@ -547,6 +655,11 @@ def test_encrypted_clients_can_cross_initiate_before_polling(running_server, tmp
 
     assert bob.receive()[0]["content"] == "hello from Alice"
     assert alice.receive()[0]["content"] == "hello from Bob"
+
+    reply = alice.send("+15550030", "reply on Bob's initiated session")
+    received_reply = bob.receive()
+
+    assert received_reply[0]["content"] == reply["content"]
 
 
 def test_encrypted_send_retries_transient_transport_failure(

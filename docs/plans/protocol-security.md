@@ -16,10 +16,16 @@ Scope: add the assignment's cryptographic identity, session, authenticated-messa
   - Acceptance: clients establish sessions, encrypt/decrypt messages, advance chains once, and store plaintext only in local history.
 - [x] 6. Add protocol integration and CLI tests.
   - Acceptance: two clients complete an encrypted round trip; tampered envelopes, invalid signatures, exhausted pre-keys, and unauthorized requests fail safely.
+- [x] 7. Implement companion-device pairing.
+  - Acceptance: the file-based QR stand-in carries the companion identity and linking secret; the primary signs the link and device list; the companion verifies PHMAC and A_signature, returns D_signature, registers a device-scoped pre-key bundle, and sends session-setup proofs.
+- [x] 8. Implement client-side multi-device fan-out and device-addressed relay queues.
+  - Acceptance: a separate pairwise encrypted envelope reaches every other encrypted device, including sender companions, and only the addressed device can poll or ACK its queue.
+- [x] 9. Add the DH ratchet bonus.
+  - Acceptance: every encrypted message advertises a fresh X25519 ephemeral; when a peer ephemeral changes, both sides derive matching ratchet root/chain keys and ratchet state survives restart.
 
 ## Current Boundary
 
-The crypto, session, public pre-key transport, HMAC request-authentication, encrypted client-envelope, and integration-test layers are complete. The HTTP relay sees only opaque encrypted content for encrypted clients; optional companion-device and DH-ratchet work remains outside this core scope.
+The core crypto, session, public pre-key transport, HMAC request-authentication, and encrypted client-envelope layers are complete. Companion pairing, multi-device fan-out, and the DH ratchet bonus are implemented. The HTTP relay sees only opaque encrypted content for encrypted clients.
 
 ## Assignment Decisions
 
